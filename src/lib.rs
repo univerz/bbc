@@ -15,7 +15,7 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 #[allow(unused)]
 mod interner;
 pub mod machine;
-// pub mod skelet_cps;
+pub mod skelet_cps;
 mod ui;
 
 #[derive(Debug, Clone, parse_display::Display, parse_display::FromStr)]
