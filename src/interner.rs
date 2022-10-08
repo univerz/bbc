@@ -51,7 +51,7 @@ impl ITape {
         self.len == 0
     }
 
-    pub fn fmt<'a, T>(self, orient: Orientation, interner: &'a InternerTape<T>) -> TapeFmt<'a, T> {
+    pub fn ifmt<'a, T>(self, orient: Orientation, interner: &'a InternerTape<T>) -> TapeFmt<'a, T> {
         TapeFmt { itape: self, orient, interner }
     }
 }
@@ -164,20 +164,20 @@ impl<T: Hash + PartialEq + Clone, S: BuildHasher> InternerTape<T, S> {
 
 pub trait InternedDisplay: Sized {
     type I;
-    fn fmti(&self, interner: &InternerTape<Self::I>, f: &mut fmt::Formatter<'_>) -> fmt::Result;
-    fn fmt<'a>(&'a self, interner: &'a InternerTape<Self::I>) -> InternedPrinter<'a, Self, Self::I> {
-        InternedPrinter { obj: self, interner }
+    fn fmt(&self, interner: &InternerTape<Self::I>, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn ifmt<'a>(&'a self, interner: &'a InternerTape<Self::I>) -> InternedFmt<'a, Self, Self::I> {
+        InternedFmt { obj: self, interner }
     }
 }
 
-pub struct InternedPrinter<'a, T, I> {
+pub struct InternedFmt<'a, T, I> {
     pub obj: &'a T,
     pub interner: &'a InternerTape<I>,
 }
 
-impl<'a, T: InternedDisplay> fmt::Display for InternedPrinter<'a, T, T::I> {
+impl<'a, T: InternedDisplay> fmt::Display for InternedFmt<'a, T, T::I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.obj.fmti(self.interner, f)
+        self.obj.fmt(self.interner, f)
     }
 }
 
