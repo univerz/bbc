@@ -3,11 +3,13 @@
 use anyhow::{Context, Result};
 use hashbrown::HashMap;
 use indexmap::IndexSet;
+use itertools::Itertools;
 use std::{fmt, str};
 
 use crate::{
-    interner::{ITape, InternedDisplay, InternerTape},
-    machine::{Head, Machine, Orientation},
+    interner::{ITape, InternerTape},
+    machine::{Direction, Head, Machine},
+    ui::{Display1, Display2},
     ui_dbg, ProverResult,
 };
 
@@ -31,7 +33,7 @@ struct Configuration {
 impl Configuration {
     pub fn new(zeros: ITape) -> Configuration {
         // 0..0 0..0 A> 0..0
-        Configuration { tape: [zeros, zeros, zeros], head: Head { state: 0, orient: 1 } }
+        Configuration { tape: [zeros, zeros, zeros], head: Head { state: 0, direction: Direction::Right } }
     }
 
     /// runs until head leaves the tape, split & return new conf, C (`<S ABC` -> `<S AB` & `C`) & end conf string if in tui mode
@@ -44,7 +46,7 @@ impl Configuration {
     ) -> Result<(Configuration, ITape, String, usize), Err> {
         // TODO(perf): switch to single tape?
         let mut tape = [interner[self.tape[0]].to_vec(), interner[self.tape[1]].to_vec()];
-        tape[self.head.op_orient()].extend_from_slice(&interner[self.tape[2]]);
+        tape[self.head.direction.opp_idx()].extend_from_slice(&interner[self.tape[2]]);
         fn format_conf(tape: &[Vec<u8>; 2], head: Head) -> String {
             format!(
                 "{}{}{}",
@@ -53,13 +55,13 @@ impl Configuration {
                 tape[1].iter().rev().map(u8::to_string).collect::<String>(),
             )
         }
-        while let Some(symbol) = tape[self.head.orient as usize].pop() {
+        while let Some(symbol) = tape[self.head.direction.idx()].pop() {
             let trans = machine.get_transition(symbol, self.head.state).ok_or(Err::Halt)?;
             if trans.head.state >= machine.states() {
                 return Err(Err::Halt);
             }
             self.head = trans.head;
-            tape[self.head.op_orient()].push(trans.symbol);
+            tape[self.head.direction.opp_idx()].push(trans.symbol);
             ui_dbg!("\t\t{}", format_conf(&tape, self.head));
             step_limit -= 1;
             if step_limit == 0 {
@@ -69,114 +71,116 @@ impl Configuration {
         let s = if cfg!(not(feature = "ui_tui")) { String::new() } else { format_conf(&tape, self.head) };
         // `[] <S AB C`, last item on tape is closest to head
         let mut segments =
-            tape[self.head.op_orient()].chunks(segment_size).rev().map(|chunk| interner.get_or_insert(chunk));
-        self.tape[self.head.orient()] = ITape::empty();
+            tape[self.head.direction.opp_idx()].chunks(segment_size).rev().map(|chunk| interner.get_or_insert(chunk));
+        self.tape[self.head.direction.idx()] = ITape::empty();
         self.tape[2] = segments.next().unwrap();
-        self.tape[self.head.op_orient()] = segments.next().unwrap();
+        self.tape[self.head.direction.opp_idx()] = segments.next().unwrap();
         Ok((self, segments.next().unwrap(), s, step_limit))
     }
 }
 
-impl InternedDisplay for Configuration {
-    type I = u8;
+impl Display1<&Interner> for Configuration {
     fn fmt(&self, interner: &Interner, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tape = |idx, orient| self.tape[idx as usize].ifmt(orient, interner);
-        if self.head.orient == 0 {
-            write!(f, "{}{}{}{}", tape(0, 0), self.head, tape(2, 1), tape(1, 1))
+        let tape = |idx, direction| self.tape[idx as usize].dsp(direction, interner);
+        if self.head.direction == Direction::Left {
+            write!(
+                f,
+                "{}{}{}{}",
+                tape(0, Direction::Left),
+                self.head,
+                tape(2, Direction::Right),
+                tape(1, Direction::Right)
+            )
         } else {
-            write!(f, "{}{}{}{}", tape(0, 0), tape(2, 0), self.head, tape(1, 1))
+            write!(
+                f,
+                "{}{}{}{}",
+                tape(0, Direction::Left),
+                tape(2, Direction::Left),
+                self.head,
+                tape(1, Direction::Right)
+            )
         }
     }
 }
 
 /// see the original source how this shoud work; to prevent reevaluation, this version stores configurations & dependent
 /// edges that need to be reevaluated (eg to try to insert new edge) if there is new item added to `to`.
-#[derive(Default)]
-pub struct Adjacent {
+#[derive(Default, Clone)]
+pub struct Continuation {
     to: Vec<ITape>,
-    /// configurations that should be explored after new `to` Tape is added, because they used this `orient + from` before
+    /// configurations that should be explored after new `to` Tape is added, because they used this `direction + from` before
     confs: Vec<Configuration>,
-    /// adjs that replaced this one on the edge & should be updated if new tape is added to `to`
+    /// conts that replaced this one on the edge & should be updated if new tape is added to `to`
     deps: Vec<ITape>,
 }
 
-impl Adjacent {
-    fn init(zeros: ITape) -> Adjacents {
+impl Continuation {
+    fn init(zeros: ITape) -> Continuations {
         // 0..0 -> 0..0
-        (0..=1)
-            .map(|orient| ((orient, zeros), Adjacent { to: vec![zeros], confs: Vec::new(), deps: Vec::new() }))
-            .collect()
+        let cont = Continuation { to: vec![zeros], confs: Vec::new(), deps: Vec::new() };
+        let mut ret = HashMap::with_capacity(2);
+        ret.insert((Direction::Left.idx(), zeros), cont.clone());
+        ret.insert((Direction::Right.idx(), zeros), cont);
+        ret
     }
 
-    fn get(adjs: &mut Adjacents, orient: u8, from: ITape) -> &mut Adjacent {
+    fn get(conts: &mut Continuations, direction: usize, from: ITape) -> &mut Continuation {
         // TODO(perf): custom struct made from ITape fields + u8 can shrink idx size from 12 -> 8bytes (&ITape can probably fit in less space too for ctl purposes)
-        adjs.entry((orient, from)).or_default()
+        conts.entry((direction, from)).or_default()
     }
 
-    fn add_adj(
+    fn add_edge(
         &mut self,
         confs: &mut Configurations,
         to: ITape,
-        try_add: &mut Vec<(ITape, ITape)>,
-        _orient: Orientation,
+        add_edges: &mut Vec<(ITape, ITape)>,
+        _dir: Direction,
         _from: ITape,
         _interner: &Interner,
     ) {
         if !self.to.contains(&to) {
-            ui_dbg!(
-                "\t\tadding adj ({_orient}, {}) -> {}",
-                _from.ifmt(_orient, _interner),
-                to.ifmt(_orient, _interner)
-            );
+            ui_dbg!("\t\tadding edge ({_dir}, {}) -> {}", _from.dsp(_dir, _interner), to.dsp(_dir, _interner));
             self.confs.iter().for_each(|source| CPS::add_conf(confs, *source, to, _interner));
-            self.deps.iter().map(|from| (*from, to)).collect_into(try_add);
+            self.deps.iter().map(|from| (*from, to)).collect_into(add_edges);
             self.to.push(to);
         }
     }
 }
 
-type Adjacents = HashMap<(Orientation, ITape), Adjacent>;
+type Continuations = HashMap<(usize, ITape), Continuation>; // `usize` is faster than `Direction`, probably because `.opp().idx()` & inlining
 type Configurations = IndexSet<Configuration>;
 
 /// ClosedPositionSet
 pub struct CPS {
-    adjs: Adjacents,
+    conts: Continuations,
     confs: Configurations,
     segment_size: usize,
     step_limit: usize,
     interner: Interner,
 
-    #[cfg(feature = "ui_tui")]
-    conf2end: Vec<String>,
+    _conf2end: Vec<String>,
 }
 
 impl CPS {
     fn add_conf(confs: &mut Configurations, mut conf: Configuration, tape: ITape, _interner: &Interner) {
-        conf.tape[conf.head.orient()] = tape;
+        conf.tape[conf.head.direction.idx()] = tape;
         let (_idx, _new) = confs.insert_full(conf);
         ui_dbg!(
             "\t\t\tconf {} {}",
             if _new { "added" } else { "exists" },
-            confs.get_index(_idx).unwrap().ifmt(_interner)
+            confs.get_index(_idx).unwrap().dsp(_interner)
         );
     }
 
     pub fn run(&mut self, machine: &Machine) -> Result<(), Err> {
-        let CPS {
-            adjs,
-            confs,
-            segment_size,
-            step_limit,
-            interner,
-            #[cfg(feature = "ui_tui")]
-            conf2end,
-        } = self;
+        let CPS { conts, confs, segment_size, step_limit, interner, _conf2end } = self;
         let (segment_size, step_limit) = (*segment_size, *step_limit);
         let mut total_step_limit = 10 * step_limit; // 274x 1RB---_1RC1RA_0RD0RB_1LE1RD_1LF0LE_0RB0RE
 
         let mut conf_id = 0;
         while let Some(old_conf) = confs.get_index(conf_id) {
-            ui_dbg!("running conf id={conf_id} {}", old_conf.ifmt(interner));
+            ui_dbg!("running conf id={conf_id} {}", old_conf.dsp(interner));
             // `<S ABC` -> `<S AB` + `C`
             let (conf, c, _last_conf, unused_steps) = old_conf.run(machine, step_limit, segment_size, interner)?;
             total_step_limit = total_step_limit.saturating_sub(step_limit - unused_steps);
@@ -184,53 +188,54 @@ impl CPS {
                 return Err(Err::TotalStepLimit);
             }
 
-            let orient = conf.head.orient;
+            let dir = conf.head.direction;
             #[cfg(feature = "ui_tui")]
-            conf2end.push(_last_conf);
+            _conf2end.push(_last_conf);
 
             // from -> to; accumulates new edges due to dependencies
-            let mut try_add: Vec<(ITape, ITape)> = Vec::new();
+            let mut add_edges: Vec<(ITape, ITape)> = Vec::new();
             // `ab s> c` -> `<S ABC` => copy edges starting from c into C
-            ui_dbg!("\tnew adj from replace:");
-            let old_c = old_conf.tape[conf.head.op_orient()];
+            ui_dbg!("\tnew edge from replace:");
+            let old_c = old_conf.tape[dir.opp_idx()];
             if old_c != c {
-                let old = Adjacent::get(adjs, 1 - orient, old_c);
+                let old = Continuation::get(conts, dir.opp_idx(), old_c);
                 ui_dbg!(
                     "\t\tadding dep {} to ({}, {})",
-                    c.ifmt(1 - orient, interner),
-                    1 - orient,
-                    old_c.ifmt(1 - orient, interner),
+                    c.dsp(dir.opp(), interner),
+                    dir.opp(),
+                    old_c.dsp(dir.opp(), interner),
                 );
                 old.deps.push(c);
 
                 let tos = old.to.clone();
                 if !tos.is_empty() {
-                    let adj = Adjacent::get(adjs, 1 - orient, c);
-                    tos.into_iter().for_each(|to| adj.add_adj(confs, to, &mut try_add, 1 - orient, c, interner));
+                    let cont = Continuation::get(conts, dir.opp_idx(), c);
+                    tos.into_iter().for_each(|to| cont.add_edge(confs, to, &mut add_edges, dir.opp(), c, interner));
                 }
             }
-            ui_dbg!("\tnew adj from shift:");
+            ui_dbg!("\tnew edge from shift:");
             // `<S ABC` => add B -> C
-            let b = conf.tape[conf.head.op_orient()];
-            Adjacent::get(adjs, 1 - orient, b).add_adj(confs, c, &mut try_add, 1 - orient, b, interner);
-            ui_dbg!("\tnew adj from dependencies:");
-            while let Some((from, to)) = try_add.pop() {
-                Adjacent::get(adjs, 1 - orient, from).add_adj(confs, to, &mut try_add, 1 - orient, from, interner);
+            let b = conf.tape[dir.opp_idx()];
+            Continuation::get(conts, dir.opp_idx(), b).add_edge(confs, c, &mut add_edges, dir.opp(), b, interner);
+            ui_dbg!("\tnew edge from dependencies:");
+            while let Some((from, to)) = add_edges.pop() {
+                let cont = Continuation::get(conts, dir.opp_idx(), from);
+                cont.add_edge(confs, to, &mut add_edges, dir.opp(), from, interner);
             }
 
             // `from b s> a` -> `<S ABC`; what to explore next?
-            let from = confs[conf_id].tape[conf.head.orient()];
-            ui_dbg!("\t{} -> ???", from.ifmt(orient, interner));
-            let adj = Adjacent::get(adjs, orient, from);
-            assert!(!adj.to.is_empty());
-            for to in adj.to.iter() {
-                ui_dbg!("\t\ttesting adj {}", to.ifmt(orient, interner));
+            let from = confs[conf_id].tape[dir.idx()];
+            ui_dbg!("\t{} -> ???", from.dsp(dir, interner));
+            let cont = Continuation::get(conts, dir.idx(), from);
+            assert!(!cont.to.is_empty());
+            for to in cont.to.iter() {
+                ui_dbg!("\t\ttesting edge {}", to.dsp(dir, interner));
                 Self::add_conf(confs, conf, *to, interner);
             }
 
-            if !adj.confs.contains(&conf) {
-                ui_dbg!("\tadding conf {} to ({}, {})", conf.ifmt(interner), orient, from.ifmt(orient, interner));
-                adj.confs.push(conf);
+            if !cont.confs.contains(&conf) {
+                ui_dbg!("\tadding conf {} to ({}, {})", conf.dsp(interner), dir, from.dsp(dir, interner));
+                cont.confs.push(conf);
             }
 
             conf_id += 1;
@@ -242,9 +247,9 @@ impl CPS {
     }
 
     pub fn assert_closed(&mut self, machine: &Machine) -> Result<(), Err> {
-        let lens1 = (self.adjs.values().map(|adj| adj.to.len()).sum::<usize>(), self.confs.len());
+        let lens1 = (self.conts.values().map(|cont| cont.to.len()).sum::<usize>(), self.confs.len());
         self.run(machine)?;
-        let lens2 = (self.adjs.values().map(|adj| adj.to.len()).sum(), self.confs.len());
+        let lens2 = (self.conts.values().map(|cont| cont.to.len()).sum(), self.confs.len());
         // dbg!(lens1, lens2);
         assert_eq!(lens1, lens2);
         Ok(())
@@ -260,15 +265,7 @@ impl CPS {
         let zeros = interner.get_or_insert(&vec![0; segment_size]);
         let mut confs = IndexSet::new();
         confs.insert(Configuration::new(zeros));
-        CPS {
-            adjs: Adjacent::init(zeros),
-            confs,
-            segment_size,
-            step_limit,
-            interner,
-            #[cfg(feature = "ui_tui")]
-            conf2end: Vec::new(),
-        }
+        CPS { conts: Continuation::init(zeros), confs, segment_size, step_limit, interner, _conf2end: Vec::new() }
     }
 
     pub fn prove_segment_size(machine: &Machine, segment_size: usize) -> Result<CPS, Err> {
@@ -292,24 +289,27 @@ impl Into<ProverResult> for Option<CPS> {
 
 impl fmt::Display for CPS {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (label, orient) in [("Left", 0), ("Right", 1)] {
+        for (label, direction) in [("Left", Direction::Left), ("Right", Direction::Right)] {
             writeln!(f, "\n* {label} continuations:")?;
-            self.adjs.iter().filter(|((o, _), _)| *o == orient).try_for_each(|((orient, from), adj)| {
-                adj.to.iter().try_for_each(|to| {
-                    writeln!(f, "\t{} --> {}", from.ifmt(*orient, &self.interner), to.ifmt(*orient, &self.interner))
-                })
+            self.conts.iter().filter(|((o, _), _)| *o == direction.idx()).try_for_each(|((_, from), cont)| {
+                writeln!(
+                    f,
+                    "\t{} --> {}",
+                    from.dsp(direction, &self.interner),
+                    cont.to.iter().map(|to| to.dsp(direction, &self.interner)).join(", ")
+                )
             })?;
         }
         writeln!(f, "\n* Transitions:")?;
         #[cfg(feature = "ui_tui")]
         self.confs
             .iter()
-            .zip(self.conf2end.iter())
-            .try_for_each(|(conf, to)| writeln!(f, "\t{} --> {to}", conf.ifmt(&self.interner)))?;
+            .zip(self._conf2end.iter())
+            .try_for_each(|(conf, to)| writeln!(f, "\t{} --> {to}", conf.dsp(&self.interner)))?;
         #[cfg(not(feature = "ui_tui"))]
-        self.confs.iter().try_for_each(|conf| writeln!(f, "\t{}", conf.ifmt(&self.interner)))?;
-        let cnt_adjs = self.adjs.values().map(|adj| adj.to.len()).sum::<usize>();
-        writeln!(f, "\n* #adjs={}, #confs={}", cnt_adjs, self.confs.len())
+        self.confs.iter().try_for_each(|conf| writeln!(f, "\t{}", conf.dsp(&self.interner)))?;
+        let cnt_edges = self.conts.values().map(|cont| cont.to.len()).sum::<usize>();
+        writeln!(f, "\n* #edges={}, #confs={}", cnt_edges, self.confs.len())
     }
 }
 
@@ -324,20 +324,20 @@ impl CPSCertif {
     fn from_cps(cps: Option<CPS>) -> CPSCertif {
         let mut ret = CPSCertif::default();
         if let Some(cps) = cps {
-            cps.adjs.iter().for_each(|((orient, from), adj)| {
-                adj.to.iter().for_each(|to| {
-                    let orient = *orient;
-                    ret.edges[orient as usize].push((
-                        from.ifmt(orient, &cps.interner).to_string(),
-                        to.ifmt(orient, &cps.interner).to_string(),
+            cps.conts.iter().for_each(|((direction, from), cont)| {
+                cont.to.iter().for_each(|to| {
+                    let direction: Direction = (*direction).into();
+                    ret.edges[direction.idx()].push((
+                        from.dsp(direction, &cps.interner).to_string(),
+                        to.dsp(direction, &cps.interner).to_string(),
                     ))
                 })
             });
-            for orient in 0..=1 {
-                ret.edges[orient].sort();
+            for direction in [Direction::Left, Direction::Right] {
+                ret.edges[direction.idx()].sort();
             }
             cps.confs.iter().for_each(|conf| {
-                ret.confs.push(conf.ifmt(&cps.interner).to_string());
+                ret.confs.push(conf.dsp(&cps.interner).to_string());
             });
             ret.confs.sort();
         }
@@ -367,17 +367,17 @@ impl str::FromStr for CPSCertif {
         let mut ret = CPSCertif::default();
         let mut it = s.split_whitespace();
         if it.next().contains(&"Result") {
-            for orient in 0..=1 {
+            for direction in [Direction::Left, Direction::Right] {
                 let cnt: usize = it.next().context("invalid edges len")?.parse()?;
                 for _ in 0..cnt {
                     let mut from_to = [it.next().unwrap().to_string(), it.next().unwrap().to_string()];
-                    if orient == 0 {
+                    if direction == Direction::Left {
                         from_to.iter_mut().for_each(|tape| *tape = tape.chars().rev().collect());
                     }
                     let [from, to] = from_to;
-                    ret.edges[orient].push((from, to));
+                    ret.edges[direction.idx()].push((from, to));
                 }
-                ret.edges[orient].sort();
+                ret.edges[direction.idx()].sort();
             }
             let cnt: usize = it.next().context("invalid confs len")?.parse()?;
             for _ in 0..cnt {

@@ -7,7 +7,7 @@ use core::{
 use hashbrown::hash_map::{HashMap, RawEntryMut};
 use std::fmt;
 
-use crate::machine::Orientation;
+use crate::{machine::Direction, ui::Display2};
 
 macro_rules! index_unchecked {
     ($place:expr, $index:expr) => {
@@ -50,15 +50,20 @@ impl ITape {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
-
-    pub fn ifmt<'a, T>(self, orient: Orientation, interner: &'a InternerTape<T>) -> TapeFmt<'a, T> {
-        TapeFmt { itape: self, orient, interner }
-    }
 }
 
 impl Default for ITape {
     fn default() -> Self {
         ITape::empty()
+    }
+}
+
+impl<I: fmt::Display> Display2<Direction, &InternerTape<I>> for ITape {
+    fn fmt(&self, direction: Direction, interner: &InternerTape<I>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let it = interner[*self].iter();
+        let mut it: Box<dyn Iterator<Item = _>> =
+            if direction == Direction::Left { Box::new(it) } else { Box::new(it.rev()) };
+        it.try_for_each(|symbol| write!(f, "{}", symbol))
     }
 }
 
@@ -159,38 +164,5 @@ impl<T: Hash + PartialEq + Clone, S: BuildHasher> InternerTape<T, S> {
             }
         };
         symbol
-    }
-}
-
-pub trait InternedDisplay: Sized {
-    type I;
-    fn fmt(&self, interner: &InternerTape<Self::I>, f: &mut fmt::Formatter<'_>) -> fmt::Result;
-    fn ifmt<'a>(&'a self, interner: &'a InternerTape<Self::I>) -> InternedFmt<'a, Self, Self::I> {
-        InternedFmt { obj: self, interner }
-    }
-}
-
-pub struct InternedFmt<'a, T, I> {
-    pub obj: &'a T,
-    pub interner: &'a InternerTape<I>,
-}
-
-impl<'a, T: InternedDisplay> fmt::Display for InternedFmt<'a, T, T::I> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.obj.fmt(self.interner, f)
-    }
-}
-
-pub struct TapeFmt<'a, I> {
-    itape: ITape,
-    orient: Orientation,
-    interner: &'a InternerTape<I>,
-}
-
-impl<'a, I: fmt::Display> fmt::Display for TapeFmt<'a, I> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let it = self.interner[self.itape].iter();
-        let mut it: Box<dyn Iterator<Item = _>> = if self.orient == 0 { Box::new(it) } else { Box::new(it.rev()) };
-        it.try_for_each(|symbol| write!(f, "{}", symbol))
     }
 }

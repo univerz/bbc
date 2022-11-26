@@ -1,43 +1,50 @@
 use itertools::Itertools;
 use std::{convert::TryInto, fmt};
 
-pub type Orientation = u8;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, parse_display::Display, parse_display::FromStr)]
+pub enum Direction {
+    #[display("L")]
+    Left = 0,
+    #[display("R")]
+    Right = 1,
+}
 
-// TODO
-// #[repr(usize)]
-// enum Orientation {
-//     Left = 0,
-//     Right = 1,
-// }
+impl Direction {
+    #[inline(always)]
+    /// do not use `opp().idx()`, it's slower than `opp_idx()`
+    pub fn opp(self) -> Direction {
+        if self == Direction::Left { Direction::Right } else { Direction::Left }
+    }
+
+    #[inline(always)]
+    pub fn opp_idx(self) -> usize {
+        1 - self as usize
+    }
+
+    #[inline(always)]
+    pub fn idx(self) -> usize {
+        self as usize
+    }
+}
+
+impl Into<Direction> for usize {
+    fn into(self) -> Direction {
+        if self == Direction::Left.idx() { Direction::Left } else { Direction::Right }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Head {
     pub state: u8,
-    pub orient: u8,
-}
-
-impl Head {
-    pub fn new() -> Head {
-        Head { state: 0, orient: 0 }
-    }
-
-    #[inline(always)]
-    pub fn orient(&self) -> usize {
-        self.orient as usize
-    }
-
-    #[inline(always)]
-    pub fn op_orient(&self) -> usize {
-        1 - self.orient as usize
-    }
+    pub direction: Direction,
 }
 
 impl fmt::Display for Head {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.orient == 0 {
-            write!(f, "<{}", (self.state + 'A' as u8) as char)
+        if self.direction == Direction::Left {
+            write!(f, "<{}", (self.state + b'A') as char)
         } else {
-            write!(f, "{}>", (self.state + 'A' as u8) as char)
+            write!(f, "{}>", (self.state + b'A') as char)
         }
     }
 }
@@ -49,40 +56,28 @@ pub struct Transition {
 }
 
 impl Transition {
-    pub fn undefined() -> Transition {
-        Transition { symbol: u8::MAX, head: Head::new() }
-    }
-
-    pub fn is_undefined(&self) -> bool {
-        self.symbol == u8::MAX
-    }
-
     pub fn define() -> Transition {
-        Transition { symbol: 0, head: Head { state: 0, orient: 0 } } // 0LA
+        Transition { symbol: 0, head: Head { state: 0, direction: Direction::Left } } // 0LA
     }
 
     pub fn first() -> Transition {
-        Transition { symbol: 1, head: Head { state: 1, orient: 1 } } // 1RB
+        Transition { symbol: 1, head: Head { state: 1, direction: Direction::Right } } // 1RB
     }
 
     pub fn last() -> Transition {
-        Transition { symbol: 1, head: Head { state: 25, orient: 1 } } // 1RZ
+        Transition { symbol: 1, head: Head { state: 25, direction: Direction::Right } } // 1RZ
     }
 }
 
 impl fmt::Display for Transition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.is_undefined() {
-            write!(
-                f,
-                "{}{}{}",
-                (self.symbol + '0' as u8) as char,
-                if self.head.orient == 0 { 'L' } else { 'R' },
-                (self.head.state + 'A' as u8) as char
-            )
-        } else {
-            write!(f, "---")
-        }
+        write!(
+            f,
+            "{}{}{}",
+            (self.symbol + b'0') as char,
+            if self.head.direction == Direction::Left { 'L' } else { 'R' },
+            (self.head.state + b'A') as char
+        )
     }
 }
 
@@ -92,32 +87,33 @@ impl fmt::Debug for Transition {
     }
 }
 
-// TODO: benchmark that version with dynamic symbol count & Option
+// TODO: benchmark that version with dynamic symbol count
 #[derive(Clone)]
 pub struct Machine {
-    machine: Vec<[Transition; 2]>,
+    machine: Vec<[Option<Transition>; 2]>,
 }
 
 impl Machine {
     #[inline]
     pub fn get_transition(&self, symbol: u8, state: u8) -> Option<Transition> {
-        let trans = self.machine[state as usize][symbol as usize];
-        (!trans.is_undefined()).then_some(trans)
+        self.machine[state as usize][symbol as usize]
     }
 
     pub fn from(machine: &str) -> Machine {
-        fn trans(trans: &[u8]) -> Transition {
-            let [mut symbol, mut orient, mut state]: [u8; 3] = trans.try_into().unwrap();
+        fn trans(trans: &[u8]) -> Option<Transition> {
+            let [mut symbol, mut direction, mut state]: [u8; 3] = trans.try_into().unwrap();
             match symbol as char {
-                'A'..='Z' => (state, symbol, orient) = (symbol, orient, state), // marxen's format B1R -> 1RB
-                // '-' => (symbol, orient, state) = ('1' as u8, 'R' as u8, 'Z' as u8),
-                '-' => return Transition::undefined(),
+                'A'..='Z' => (state, symbol, direction) = (symbol, direction, state), // marxen's format B1R -> 1RB
+                '-' => return None,
                 _ => (),
             }
-            Transition {
-                symbol: symbol - '0' as u8,
-                head: Head { orient: if orient == 'L' as u8 { 0 } else { 1 }, state: state - 'A' as u8 },
-            }
+            Some(Transition {
+                symbol: symbol - b'0',
+                head: Head {
+                    direction: if direction == b'L' { Direction::Left } else { Direction::Right },
+                    state: state - b'A',
+                },
+            })
         }
 
         let machine = machine.trim();
@@ -152,7 +148,7 @@ impl fmt::Display for Machine {
             if idx != 0 {
                 write!(f, "_")?;
             }
-            state.iter().try_for_each(|t| write!(f, "{}", t))
+            state.iter().try_for_each(|t| t.map(|t| write!(f, "{}", t)).unwrap_or_else(|| write!(f, "---")))
         })
     }
 }
