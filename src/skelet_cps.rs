@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use hashbrown::HashMap;
 use indexmap::IndexSet;
-use itertools::Itertools;
+use itertools::{iproduct, Itertools};
 use std::{fmt, str};
 
 use crate::{
@@ -24,16 +24,49 @@ pub enum Err {
 type Interner = InternerTape<u8>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Segment {
+    itape: ITape,
+    mode: u8,
+}
+
+impl Segment {
+    pub fn zeros(sizes: SegmentSizes, interner: &mut Interner) -> Segments {
+        let mut segment = |mode| Segment { itape: interner.get_or_insert(&vec![0; sizes[mode]]), mode: mode as u8 };
+        [segment(0), segment(1), segment(2)]
+    }
+
+    pub fn empty() -> Segment {
+        Segment { itape: ITape::empty(), mode: u8::MAX }
+    }
+
+    #[inline(always)]
+    // 0 2 1 -> 0 1 2
+    pub fn compat_mode(&self) -> u8 {
+        if self.mode == 2 { 1 } else { self.mode * 2 }
+    }
+}
+
+impl Display2<Direction, &Interner> for Segment {
+    fn fmt(&self, direction: Direction, interner: &Interner, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}, {}", self.itape.dsp(direction, interner), self.compat_mode())
+    }
+}
+
+/// 0 == left, 1 == right, 2 == middle
+pub type SegmentSizes = [usize; 3];
+/// 0 == left, 1 == right, 2 == middle
+type Segments = [Segment; 3];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Configuration {
-    /// 0 == left, 1 == right, 2 == middle
-    tape: [ITape; 3],
+    tape: Segments,
     head: Head,
 }
 
 impl Configuration {
-    pub fn new(zeros: ITape) -> Configuration {
+    pub fn new(zeros: Segments) -> Configuration {
         // 0..0 0..0 A> 0..0
-        Configuration { tape: [zeros, zeros, zeros], head: Head { state: 0, direction: Direction::Right } }
+        Configuration { tape: zeros, head: Head { state: 0, direction: Direction::Right } }
     }
 
     /// runs until head leaves the tape, split & return new conf, C (`<S ABC` -> `<S AB` & `C`) & end conf string if in tui mode
@@ -41,12 +74,11 @@ impl Configuration {
         mut self,
         machine: &Machine,
         mut step_limit: usize,
-        segment_size: usize,
         interner: &mut Interner,
-    ) -> Result<(Configuration, ITape, String, usize), Err> {
+    ) -> Result<(Configuration, Segment, String, usize), Err> {
         // TODO(perf): switch to single tape?
-        let mut tape = [interner[self.tape[0]].to_vec(), interner[self.tape[1]].to_vec()];
-        tape[self.head.direction.opp_idx()].extend_from_slice(&interner[self.tape[2]]);
+        let mut tape = [interner[self.tape[0].itape].to_vec(), interner[self.tape[1].itape].to_vec()];
+        tape[self.head.direction.opp_idx()].extend_from_slice(&interner[self.tape[2].itape]);
         fn format_conf(tape: &[Vec<u8>; 2], head: Head) -> String {
             format!(
                 "{}{}{}",
@@ -70,18 +102,38 @@ impl Configuration {
         }
         let s = if cfg!(not(feature = "ui_tui")) { String::new() } else { format_conf(&tape, self.head) };
         // `[] <S AB C`, last item on tape is closest to head
-        let mut segments =
-            tape[self.head.direction.opp_idx()].chunks(segment_size).rev().map(|chunk| interner.get_or_insert(chunk));
-        self.tape[self.head.direction.idx()] = ITape::empty();
-        self.tape[2] = segments.next().unwrap();
-        self.tape[self.head.direction.opp_idx()] = segments.next().unwrap();
-        Ok((self, segments.next().unwrap(), s, step_limit))
+
+        // end tape \       |   0 2 1    // start idxs; ? == empty; x == last segment out
+        // <==dir0 i2 i1 i0 | ? 2 1 x    // mapped to conf
+        // i0 i1 i2 >==dir1 |   x 1 2 ?
+        // new conf segment = end_tape position & size
+        // [idx()]    = ? TBD
+        // [2]        = first from top - size(idx())
+        // [op_idx()] = second - size(2)
+        // out        = last - size(op_idx())
+
+        let initial_segments = self.tape;
+        let dir = self.head.direction;
+        let mut end_tape = tape[dir.opp_idx()].as_slice();
+        let mut pop = |idx| {
+            let initial_segment: Segment = initial_segments[idx];
+            let (tape, new_end_tape) = end_tape.split_at(initial_segment.itape.len());
+            end_tape = new_end_tape;
+            Segment { itape: interner.get_or_insert(tape), mode: initial_segment.mode }
+        };
+
+        let out_segment = pop(dir.opp_idx());
+        self.tape[dir.opp_idx()] = pop(2);
+        self.tape[2] = pop(dir.idx());
+        self.tape[dir.idx()] = Segment::empty();
+
+        Ok((self, out_segment, s, step_limit))
     }
 }
 
 impl Display1<&Interner> for Configuration {
     fn fmt(&self, interner: &Interner, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tape = |idx, direction| self.tape[idx as usize].dsp(direction, interner);
+        let tape = |idx, direction| self.tape[idx as usize].itape.dsp(direction, interner);
         if self.head.direction == Direction::Left {
             write!(
                 f,
@@ -100,7 +152,8 @@ impl Display1<&Interner> for Configuration {
                 self.head,
                 tape(1, Direction::Right)
             )
-        }
+        }?;
+        [0, 2, 1].into_iter().try_for_each(|idx| write!(f, " {}", self.tape[idx].compat_mode()))
     }
 }
 
@@ -108,24 +161,27 @@ impl Display1<&Interner> for Configuration {
 /// edges that need to be reevaluated (eg to try to insert new edge) if there is new item added to `to`.
 #[derive(Default, Clone)]
 pub struct Continuation {
-    to: Vec<ITape>,
+    to: Vec<Segment>,
     /// configurations that should be explored after new `to` Tape is added, because they used this `direction + from` before
     confs: Vec<Configuration>,
     /// conts that replaced this one on the edge & should be updated if new tape is added to `to`
-    deps: Vec<ITape>,
+    deps: Vec<Segment>,
 }
 
 impl Continuation {
-    fn init(zeros: ITape) -> Continuations {
+    fn init(zeros: Segments) -> Continuations {
         // 0..0 -> 0..0
-        let cont = Continuation { to: vec![zeros], confs: Vec::new(), deps: Vec::new() };
         let mut ret = HashMap::with_capacity(2);
-        ret.insert((Direction::Left.idx(), zeros), cont.clone());
-        ret.insert((Direction::Right.idx(), zeros), cont);
+        let mut do_it = |mode| {
+            let zeros = zeros[mode];
+            ret.insert((mode, zeros), Continuation { to: vec![zeros], confs: Vec::new(), deps: Vec::new() });
+        };
+        do_it(Direction::Left.idx());
+        do_it(Direction::Right.idx());
         ret
     }
 
-    fn get(conts: &mut Continuations, direction: usize, from: ITape) -> &mut Continuation {
+    fn get(conts: &mut Continuations, direction: usize, from: Segment) -> &mut Continuation {
         // TODO(perf): custom struct made from ITape fields + u8 can shrink idx size from 12 -> 8bytes (&ITape can probably fit in less space too for ctl purposes)
         conts.entry((direction, from)).or_default()
     }
@@ -133,10 +189,10 @@ impl Continuation {
     fn add_edge(
         &mut self,
         confs: &mut Configurations,
-        to: ITape,
-        add_edges: &mut Vec<(ITape, ITape)>,
+        to: Segment,
+        add_edges: &mut Vec<(Segment, Segment)>,
         _dir: Direction,
-        _from: ITape,
+        _from: Segment,
         _interner: &Interner,
     ) {
         if !self.to.contains(&to) {
@@ -148,14 +204,14 @@ impl Continuation {
     }
 }
 
-type Continuations = HashMap<(usize, ITape), Continuation>; // `usize` is faster than `Direction`, probably because `.opp().idx()` & inlining
+type Continuations = HashMap<(usize, Segment), Continuation>; // `usize` is faster than `Direction`, probably because `.opp().idx()` & inlining
 type Configurations = IndexSet<Configuration>;
 
 /// ClosedPositionSet
 pub struct CPS {
     conts: Continuations,
     confs: Configurations,
-    segment_size: usize,
+    pub segment_sizes: SegmentSizes,
     step_limit: usize,
     interner: Interner,
 
@@ -163,8 +219,8 @@ pub struct CPS {
 }
 
 impl CPS {
-    fn add_conf(confs: &mut Configurations, mut conf: Configuration, tape: ITape, _interner: &Interner) {
-        conf.tape[conf.head.direction.idx()] = tape;
+    fn add_conf(confs: &mut Configurations, mut conf: Configuration, segment: Segment, _interner: &Interner) {
+        conf.tape[conf.head.direction.idx()] = segment;
         let (_idx, _new) = confs.insert_full(conf);
         ui_dbg!(
             "\t\t\tconf {} {}",
@@ -174,15 +230,15 @@ impl CPS {
     }
 
     pub fn run(&mut self, machine: &Machine) -> Result<(), Err> {
-        let CPS { conts, confs, segment_size, step_limit, interner, _conf2end } = self;
-        let (segment_size, step_limit) = (*segment_size, *step_limit);
+        let CPS { conts, confs, segment_sizes: _, step_limit, interner, _conf2end } = self;
+        let step_limit = *step_limit;
         let mut total_step_limit = 10 * step_limit; // 274x 1RB---_1RC1RA_0RD0RB_1LE1RD_1LF0LE_0RB0RE
 
         let mut conf_id = 0;
         while let Some(old_conf) = confs.get_index(conf_id) {
             ui_dbg!("running conf id={conf_id} {}", old_conf.dsp(interner));
             // `<S ABC` -> `<S AB` + `C`
-            let (conf, c, _last_conf, unused_steps) = old_conf.run(machine, step_limit, segment_size, interner)?;
+            let (conf, c, _last_conf, unused_steps) = old_conf.run(machine, step_limit, interner)?;
             total_step_limit = total_step_limit.saturating_sub(step_limit - unused_steps);
             if total_step_limit == 0 {
                 return Err(Err::TotalStepLimit);
@@ -193,7 +249,7 @@ impl CPS {
             _conf2end.push(_last_conf);
 
             // from -> to; accumulates new edges due to dependencies
-            let mut add_edges: Vec<(ITape, ITape)> = Vec::new();
+            let mut add_edges: Vec<(Segment, Segment)> = Vec::new();
             // `ab s> c` -> `<S ABC` => copy edges starting from c into C
             ui_dbg!("\tnew edge from replace:");
             let old_c = old_conf.tape[dir.opp_idx()];
@@ -255,21 +311,21 @@ impl CPS {
         Ok(())
     }
 
-    pub fn new(machine: &Machine, segment_size: usize) -> CPS {
-        let tape_len: usize = 17.min(segment_size * 3);
+    pub fn new(machine: &Machine, segment_sizes: SegmentSizes) -> CPS {
+        let tape_len: usize = 17.min(segment_sizes.iter().max().unwrap() * 3);
         let step_limit = 10
             * (machine.states() as usize * machine.symbols() as usize)
             * (tape_len + 1)
             * 2usize.pow(tape_len as u32);
         let mut interner = Interner::new();
-        let zeros = interner.get_or_insert(&vec![0; segment_size]);
+        let zeros = Segment::zeros(segment_sizes, &mut interner);
         let mut confs = IndexSet::new();
         confs.insert(Configuration::new(zeros));
-        CPS { conts: Continuation::init(zeros), confs, segment_size, step_limit, interner, _conf2end: Vec::new() }
+        CPS { conts: Continuation::init(zeros), confs, segment_sizes, step_limit, interner, _conf2end: Vec::new() }
     }
 
-    pub fn prove_segment_size(machine: &Machine, segment_size: usize) -> Result<CPS, Err> {
-        let mut cps = CPS::new(machine, segment_size);
+    pub fn prove_size(machine: &Machine, segment_sizes: SegmentSizes) -> Result<CPS, Err> {
+        let mut cps = CPS::new(machine, segment_sizes);
         cps.run(machine)?;
         // println!("{cps}\n***************************************");
         // cps.assert_closed(machine)?;
@@ -277,7 +333,8 @@ impl CPS {
     }
 
     pub fn prove(machine: &Machine, max_segment_size: usize) -> Option<CPS> {
-        (1..=max_segment_size).find_map(|segment_size| Self::prove_segment_size(machine, segment_size).ok())
+        iproduct!(1..=max_segment_size, 1..=max_segment_size, 1..=max_segment_size)
+            .find_map(|(a, b, c)| Self::prove_size(machine, [a, b, c]).ok())
     }
 }
 
@@ -309,7 +366,7 @@ impl fmt::Display for CPS {
         #[cfg(not(feature = "ui_tui"))]
         self.confs.iter().try_for_each(|conf| writeln!(f, "\t{}", conf.dsp(&self.interner)))?;
         let cnt_edges = self.conts.values().map(|cont| cont.to.len()).sum::<usize>();
-        writeln!(f, "\n* #edges={}, #confs={}", cnt_edges, self.confs.len())
+        writeln!(f, "\n* #edges={}, #confs={}, sizes(l,r,m)={:?}", cnt_edges, self.confs.len(), self.segment_sizes)
     }
 }
 
@@ -351,6 +408,7 @@ impl CPSCertif {
         let machine = Machine::from(machine);
         let certif: CPSCertif = certif.parse()?;
 
+        // let cps = CPS::prove(&machine, max_segment_size);
         let cps = CPS::prove(&machine, max_segment_size);
         // cps.as_ref().map(|cps| println!("{cps}"));
         let my_certif = CPSCertif::from_cps(cps);
@@ -370,18 +428,19 @@ impl str::FromStr for CPSCertif {
             for direction in [Direction::Left, Direction::Right] {
                 let cnt: usize = it.next().context("invalid edges len")?.parse()?;
                 for _ in 0..cnt {
-                    let mut from_to = [it.next().unwrap().to_string(), it.next().unwrap().to_string()];
+                    let mut from_to: Vec<_> = (0..4).map(|_| it.next().unwrap().to_string()).collect();
                     if direction == Direction::Left {
-                        from_to.iter_mut().for_each(|tape| *tape = tape.chars().rev().collect());
+                        [0, 2].into_iter().for_each(|idx| from_to[idx] = from_to[idx].chars().rev().collect())
                     }
-                    let [from, to] = from_to;
-                    ret.edges[direction.idx()].push((from, to));
+                    ret.edges[direction.idx()].push((from_to[0..2].join(", "), from_to[2..4].join(", ")));
                 }
                 ret.edges[direction.idx()].sort();
             }
             let cnt: usize = it.next().context("invalid confs len")?.parse()?;
+            let conf_it = it.chunks(4);
+            let mut conf_it = conf_it.into_iter();
             for _ in 0..cnt {
-                ret.confs.push(it.next().unwrap().to_string());
+                ret.confs.push(conf_it.next().unwrap().into_iter().join(" "));
             }
             ret.confs.sort();
         }
