@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
 use argh::FromArgs;
-use std::result::Result as StdResult;
 
 use bbc::machine::Machine;
 
@@ -28,21 +27,11 @@ enum SubCommand {
 #[argh(subcommand, name = "cps")]
 struct CPS {
     /// segment size
-    #[argh(option, default = "[0, 0, 0]", from_str_fn(segment_size_from_str))]
+    #[argh(option, default = "bbc::skelet_cps::SegmentSizes([0,0,0])")]
     pub segment_sizes: bbc::skelet_cps::SegmentSizes,
     /// max segment size
     #[argh(option, default = "20")]
     pub max_segment_size: usize,
-}
-
-fn segment_size_from_str(s: &str) -> StdResult<bbc::skelet_cps::SegmentSizes, String> {
-    let err = || format!("{s:?} should look like `1,2,3` where numbers are length of left, right & middle segment");
-    s.split(",")
-        .map(|i| i.parse::<usize>())
-        .collect::<StdResult<Vec<_>, _>>()
-        .map_err(|_| err())?
-        .try_into()
-        .map_err(|_| err())
 }
 
 fn main() -> Result<()> {
@@ -50,7 +39,7 @@ fn main() -> Result<()> {
     let machine = Machine::from(&args.machine);
     match args.cmd {
         SubCommand::CPS(cps) => {
-            let ret = if !cps.segment_sizes.contains(&0) {
+            let ret = if !cps.segment_sizes.0.contains(&0) {
                 bbc::skelet_cps::CPS::prove_size(&machine, cps.segment_sizes).map_err(|e| anyhow!("{e:?}"))
             } else {
                 bbc::skelet_cps::CPS::prove(&machine, cps.max_segment_size).ok_or_else(|| anyhow!("undecided"))

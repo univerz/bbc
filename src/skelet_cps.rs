@@ -4,13 +4,16 @@ use anyhow::{Context, Result};
 use hashbrown::HashMap;
 use indexmap::IndexSet;
 use itertools::{iproduct, Itertools};
-use std::{fmt, str};
+use std::{
+    fmt,
+    str::{self, FromStr},
+};
 
 use crate::{
     interner::{ITape, InternerTape},
     machine::{Direction, Head, Machine},
     ui::{Display1, Display2},
-    ui_dbg, ProverResult,
+    ui_dbg, Infinite, ProverResult,
 };
 
 #[derive(Debug)]
@@ -21,7 +24,32 @@ pub enum Err {
     ConfLimit,
 }
 
+const NOT_VISITED_0: u8 = u8::MAX;
+// const NOT_VISITED_0: u8 = 0;
+
 type Interner = InternerTape<u8>;
+
+impl Display2<Direction, &InternerTape<u8>> for ITape {
+    fn fmt(&self, direction: Direction, interner: &InternerTape<u8>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let it = interner[*self].iter();
+        let mut it: Box<dyn Iterator<Item = _>> =
+            if direction == Direction::Left { Box::new(it) } else { Box::new(it.rev()) };
+        it.try_for_each(|symbol| write!(f, "{}", symbol2char(symbol)))
+    }
+}
+
+fn symbol2char(i: &u8) -> char {
+    if *i == u8::MAX { '.' } else { (i + b'0') as char }
+}
+
+fn format_conf(tape: &[Vec<u8>; 2], head: Head) -> String {
+    format!(
+        "{}{}{}",
+        tape[0].iter().map(symbol2char).collect::<String>(),
+        head,
+        tape[1].iter().rev().map(symbol2char).collect::<String>(),
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Segment {
@@ -31,7 +59,8 @@ struct Segment {
 
 impl Segment {
     pub fn zeros(sizes: SegmentSizes, interner: &mut Interner) -> Segments {
-        let mut segment = |mode| Segment { itape: interner.get_or_insert(&vec![0; sizes[mode]]), mode: mode as u8 };
+        let mut segment =
+            |mode| Segment { itape: interner.get_or_insert(&vec![NOT_VISITED_0; sizes.0[mode]]), mode: mode as u8 };
         [segment(0), segment(1), segment(2)]
     }
 
@@ -53,9 +82,34 @@ impl Display2<Direction, &Interner> for Segment {
 }
 
 /// 0 == left, 1 == right, 2 == middle
-pub type SegmentSizes = [usize; 3];
-/// 0 == left, 1 == right, 2 == middle
 type Segments = [Segment; 3];
+/// 0 == left, 1 == right, 2 == middle
+#[derive(Clone, Copy, Debug)]
+pub struct SegmentSizes(pub [usize; 3]);
+
+impl fmt::Display for SegmentSizes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}-{}", self.0[0], self.0[1], self.0[2])
+    }
+}
+
+impl FromStr for SegmentSizes {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let err = || {
+            format!("{s:?} should look like `1,2,3` (`1-2-3`) where numbers are length of left, right & middle segment")
+        };
+        let separator = if s.contains(',') { ',' } else { '-' };
+        s.split(separator)
+            .map(|i| i.parse::<usize>())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| err())?
+            .try_into()
+            .map(|s| SegmentSizes(s))
+            .map_err(|_| err())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Configuration {
@@ -79,15 +133,11 @@ impl Configuration {
         // TODO(perf): switch to single tape?
         let mut tape = [interner[self.tape[0].itape].to_vec(), interner[self.tape[1].itape].to_vec()];
         tape[self.head.direction.opp_idx()].extend_from_slice(&interner[self.tape[2].itape]);
-        fn format_conf(tape: &[Vec<u8>; 2], head: Head) -> String {
-            format!(
-                "{}{}{}",
-                tape[0].iter().map(u8::to_string).collect::<String>(),
-                head,
-                tape[1].iter().rev().map(u8::to_string).collect::<String>(),
-            )
-        }
-        while let Some(symbol) = tape[self.head.direction.idx()].pop() {
+
+        while let Some(mut symbol) = tape[self.head.direction.idx()].pop() {
+            if symbol == NOT_VISITED_0 {
+                symbol = 0;
+            }
             let trans = machine.get_transition(symbol, self.head.state).ok_or(Err::Halt)?;
             if trans.head.state >= machine.states() {
                 return Err(Err::Halt);
@@ -312,7 +362,7 @@ impl CPS {
     }
 
     pub fn new(machine: &Machine, segment_sizes: SegmentSizes) -> CPS {
-        let tape_len: usize = 17.min(segment_sizes.iter().max().unwrap() * 3);
+        let tape_len: usize = 17.min(segment_sizes.0.iter().max().unwrap() * 3);
         let step_limit = 10
             * (machine.states() as usize * machine.symbols() as usize)
             * (tape_len + 1)
@@ -334,13 +384,17 @@ impl CPS {
 
     pub fn prove(machine: &Machine, max_segment_size: usize) -> Option<CPS> {
         iproduct!(1..=max_segment_size, 1..=max_segment_size, 1..=max_segment_size)
-            .find_map(|(a, b, c)| Self::prove_size(machine, [a, b, c]).ok())
+            .find_map(|(a, b, c)| Self::prove_size(machine, SegmentSizes([a, b, c])).ok())
     }
 }
 
 impl Into<ProverResult> for Option<CPS> {
     fn into(self) -> ProverResult {
-        if self.is_some() { ProverResult::Infinite } else { ProverResult::Limit(format!("segment_size")) }
+        if let Some(cps) = self {
+            ProverResult::Infinite(Infinite::CPS3(cps.segment_sizes))
+        } else {
+            ProverResult::Limit(format!("segment_size"))
+        }
     }
 }
 

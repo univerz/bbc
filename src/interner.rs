@@ -63,15 +63,6 @@ impl Default for ITape {
     }
 }
 
-impl<I: fmt::Display> Display2<Direction, &InternerTape<I>> for ITape {
-    fn fmt(&self, direction: Direction, interner: &InternerTape<I>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let it = interner[*self].iter();
-        let mut it: Box<dyn Iterator<Item = _>> =
-            if direction == Direction::Left { Box::new(it) } else { Box::new(it.rev()) };
-        it.try_for_each(|symbol| write!(f, "{}", symbol))
-    }
-}
-
 #[derive(Clone)]
 pub struct InternerTape<T, S = ahash::RandomState> {
     hasher: S,

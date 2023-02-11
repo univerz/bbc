@@ -21,12 +21,18 @@ mod ui;
 pub enum ProverResult {
     #[display("{}")]
     Halt,
-    #[display("{}")]
-    Infinite,
+    #[display("{}({0})")]
+    Infinite(Infinite),
     #[display("{}(\"{0}\")")]
     Limit(String),
     #[display("{}(\"{0}\")")]
     Panic(String),
+}
+
+#[derive(Debug, Clone, parse_display::Display, parse_display::FromStr)]
+pub enum Infinite {
+    #[display("{}({0})")]
+    CPS3(skelet_cps::SegmentSizes),
 }
 
 impl ProverResult {
@@ -58,7 +64,7 @@ impl ProverCount {
     pub fn update(&mut self, state: ProverResult) {
         match state {
             ProverResult::Halt => self.halt += 1,
-            ProverResult::Infinite => self.infinite += 1,
+            ProverResult::Infinite(_) => self.infinite += 1,
             ProverResult::Limit(_) => self.limit += 1,
             ProverResult::Panic(_) => self.panic += 1,
         }
