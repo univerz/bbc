@@ -11,7 +11,7 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 mod interner;
 pub mod machine;
 pub mod skelet_cps;
-mod ui;
+pub mod ui;
 
 #[derive(Debug, Clone, parse_display::Display, parse_display::FromStr)]
 pub enum ProverResult {
