@@ -1,3 +1,5 @@
+#![feature(result_contains_err)]
+
 use argh::FromArgs;
 use bbc::machine::{Direction, Head, Machine};
 use bbc::ui_dbg;
@@ -5,6 +7,8 @@ use color_eyre::eyre::Result;
 use derivative::Derivative;
 use owo_colors::OwoColorize;
 use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::{
     fmt,
     io::{self, Write},
@@ -12,10 +16,11 @@ use std::{
 };
 use termion::{event::Key, input::TermRead, raw::IntoRawMode, screen::IntoAlternateScreen};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Err {
     Halt,
     StepLimit,
+    Interesting,
     Unreachable,
 }
 
@@ -61,9 +66,9 @@ impl Configuration {
                 Item::Exp { block, exp, visited: _ } => {
                     if exp > 1 {
                         tape.push(Item::Exp { block, exp: exp - 1, visited: true });
-                        Self::compress(tape, blocks);
+                        Self::compress(tape, blocks)?;
                     }
-                    tape.extend_from_slice(blocks[block as usize])
+                    tape.extend_from_slice(blocks[block as usize]) // TODO: visited
                 }
                 Item::Unreachable => return Err(Err::Unreachable),
             }
@@ -71,12 +76,12 @@ impl Configuration {
         Ok(0)
     }
 
-    fn push_symbol(symbol: u8, tape: &mut Tape, blocks: RefBlocks) {
+    fn push_symbol(symbol: u8, tape: &mut Tape, blocks: RefBlocks) -> Result<(), Err> {
         tape.push(Item::S(symbol));
-        Self::compress(tape, blocks);
+        Self::compress(tape, blocks)
     }
 
-    fn compress(tape: &mut Tape, blocks: RefBlocks) {
+    fn compress(tape: &mut Tape, blocks: RefBlocks) -> Result<(), Err> {
         while let Some(removed) = blocks.iter().enumerate().find_map(|(idx, &block)| {
             tape.ends_with(block).then(|| {
                 tape.truncate(tape.len() - block.len());
@@ -90,11 +95,15 @@ impl Configuration {
                     continue;
                 }
             }
-            tape.push(Item::Exp { block: removed, exp: 1, visited: true })
+            tape.push(Item::Exp { block: removed, exp: 1, visited: true });
+            // if removed == 4 {
+            //     return Err(Err::Interesting);
+            // }
         }
+        Ok(())
     }
 
-    fn leap(&mut self, blocks: RefBlocks) -> bool {
+    fn leap(&mut self, blocks: RefBlocks) -> Result<bool, Err> {
         let [ltape, rtape] = &mut self.tape;
         // stops before new block compression `01 a^61652 10 E>  d^11104  a^85609885 10`
         // if self.head.state != 0 && self.head.direction == Direction::Right {
@@ -104,53 +113,53 @@ impl Configuration {
         // }
 
         if self.head.state == 0 && self.head.direction == Direction::Right {
-            // // right tape endgame  `A> a^a 1010 a^b 11` & `a, b % 2 == 0` -> `<C 10 a^(a-2) 1010 a^(b+4) 11` // --conf "!  A> a^4 1010 a^2 11"
-            // if let [
-            //     Item::S(1),
-            //     Item::S(1),
-            //     Item::Exp { block: 0, exp: exp_b, visited: _ },
-            //     Item::S(0),
-            //     Item::S(1),
-            //     Item::S(0),
-            //     Item::S(1),
-            //     Item::Exp { block: 0, exp: exp_a, visited: _ },
-            // ] = rtape.as_mut_slice()
-            // {
-            //     if *exp_a >= 4 && *exp_a % 2 == 0 && *exp_b % 2 == 0 {
-            //         self.head.state = 2;
-            //         self.head.direction = Direction::Left;
-            //         *exp_a -= 2;
-            //         *exp_b = exp_b.checked_add(4).unwrap();
-            //         rtape.push(Item::S(0));
-            //         rtape.push(Item::S(1));
-            //         return true;
-            //     }
-            // }
-            // // right tape endgame  `A> a^a 1010 a^b 10 ^c 11` & `a, c % 2 == 0, b % 2 == 1` -> `<C 10 a^(a-2) 1010 a^(b+4) 10 a^c 11` // --conf "!  A> a^4 1010 a^1 10 a^2 11"
-            // if let [
-            //     Item::S(1),
-            //     Item::S(1),
-            //     Item::Exp { block: 0, exp: exp_c, visited: _ },
-            //     Item::S(0),
-            //     Item::S(1),
-            //     Item::Exp { block: 0, exp: exp_b, visited: _ },
-            //     Item::S(0),
-            //     Item::S(1),
-            //     Item::S(0),
-            //     Item::S(1),
-            //     Item::Exp { block: 0, exp: exp_a, visited: _ },
-            // ] = rtape.as_mut_slice()
-            // {
-            //     if *exp_a >= 4 && *exp_a % 2 == 0 && *exp_b % 2 == 1 && *exp_c % 2 == 0 {
-            //         self.head.state = 2;
-            //         self.head.direction = Direction::Left;
-            //         *exp_a -= 2;
-            //         *exp_b = exp_b.checked_add(4).unwrap();
-            //         rtape.push(Item::S(0));
-            //         rtape.push(Item::S(1));
-            //         return true;
-            //     }
-            // }
+            // right tape endgame  `A> a^a 1010 a^b 11` & `a, b % 2 == 0` -> `<C 10 a^(a-2) 1010 a^(b+4) 11` // --conf "!  A> a^4 1010 a^2 11"
+            if let [
+                Item::S(1),
+                Item::S(1),
+                Item::Exp { block: 0, exp: exp_b, visited: _ },
+                Item::S(0),
+                Item::S(1),
+                Item::S(0),
+                Item::S(1),
+                Item::Exp { block: 0, exp: exp_a, visited: _ },
+            ] = rtape.as_mut_slice()
+            {
+                if *exp_a >= 4 && *exp_a % 2 == 0 && *exp_b % 2 == 0 {
+                    self.head.state = 2;
+                    self.head.direction = Direction::Left;
+                    *exp_a -= 2;
+                    *exp_b = exp_b.checked_add(4).unwrap();
+                    rtape.push(Item::S(0));
+                    rtape.push(Item::S(1));
+                    return Ok(true);
+                }
+            }
+            // right tape endgame  `A> a^a 1010 a^b 10 ^c 11` & `a, c % 2 == 0, b % 2 == 1` -> `<C 10 a^(a-2) 1010 a^(b+4) 10 a^c 11` // --conf "!  A> a^4 1010 a^1 10 a^2 11"
+            if let [
+                Item::S(1),
+                Item::S(1),
+                Item::Exp { block: 0, exp: exp_c, visited: _ },
+                Item::S(0),
+                Item::S(1),
+                Item::Exp { block: 0, exp: exp_b, visited: _ },
+                Item::S(0),
+                Item::S(1),
+                Item::S(0),
+                Item::S(1),
+                Item::Exp { block: 0, exp: exp_a, visited: _ },
+            ] = rtape.as_mut_slice()
+            {
+                if *exp_a >= 4 && *exp_a % 2 == 0 && *exp_b % 2 == 1 && *exp_c % 2 == 0 {
+                    self.head.state = 2;
+                    self.head.direction = Direction::Left;
+                    *exp_a -= 2;
+                    *exp_b = exp_b.checked_add(4).unwrap();
+                    rtape.push(Item::S(0));
+                    rtape.push(Item::S(1));
+                    return Ok(true);
+                }
+            }
 
             // A> a^2n -> a^2n A> || A> a^2n+1 -> a^2n+1 B> || A> d^n -> c^n A>
             if let Some(Item::Exp { block, exp: item_exp, visited: _ }) = rtape.last().copied() {
@@ -173,7 +182,7 @@ impl Configuration {
                                     ui_dbg!("\tleap {}<", (from_block + b'a') as char);
                                 }
                             }
-                            return true;
+                            return Ok(true);
                         }
                     }
                 }
@@ -199,29 +208,39 @@ impl Configuration {
                                 ui_dbg!("\tleap {}<", (from_block + b'a') as char);
                             }
                         }
-                        Self::compress(rtape, blocks); // maybe could be removed - usually it goes back through `01` & then it compresses
+                        Self::compress(rtape, blocks)?; // maybe could be removed - usually it goes back through `01` & then it compresses
                         rtape.push(Item::S(0));
                         rtape.push(Item::S(1));
-                        return true;
+                        return Ok(true);
                     }
                 }
             }
         }
 
-        false
+        Ok(false)
     }
 
     fn run(&mut self, machine: &Machine, blocks: RefBlocks, cfg: Config) -> Result<(), Err> {
         while self.sim_step < cfg.sim_step_limit {
-            if !self.leap(blocks) {
+            if !self.leap(blocks)? {
                 let symbol = Self::pop_symbol(&mut self.tape[self.head.direction.idx()], blocks)?;
                 let trans = machine.get_transition(symbol, self.head.state).ok_or(Err::Halt)?;
                 self.head = trans.head;
-                Self::push_symbol(trans.symbol, &mut self.tape[self.head.direction.opp_idx()], blocks);
+                Self::push_symbol(trans.symbol, &mut self.tape[self.head.direction.opp_idx()], blocks)?;
             }
+
+            let show = false;
+            // self
+            // .tape
+            // .iter()
+            // .any(|tape| tape.iter().any(|item| matches!(item, Item::Exp{ block, ..} if *block > 0)));
+
             self.sim_step += 1;
-            if self.sim_step & ((1 << cfg.print_mod) - 1) == 0 {
-                println!("{}", self);
+            if show || self.sim_step & ((1 << cfg.print_mod) - 1) == 0 {
+                if show {
+                    print!("{}", "# ".bright_red());
+                }
+                println!("{self}");
             }
         }
         return Err(Err::StepLimit);
@@ -260,6 +279,10 @@ fn raw_parse(s: &str) -> Result<(Configuration, usize)> {
     let mut dir = Direction::Left.idx();
 
     for token in s.split_whitespace() {
+        if token.ends_with(":") {
+            conf.sim_step = token[0..token.len() - 1].parse().unwrap();
+            continue;
+        }
         if token.contains('<') {
             dir += 1;
             conf.head.direction = Direction::Left;
@@ -337,6 +360,8 @@ struct Config {
 fn main() -> Result<()> {
     color_eyre::install()?;
 
+    // return transcode();
+
     let machine = Machine::from("1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC");
     let args: Args = argh::from_env();
     let cfg = Config { sim_step_limit: 2usize.checked_pow(args.sim_step_limit).unwrap(), print_mod: args.print_mod };
@@ -359,6 +384,7 @@ fn main() -> Result<()> {
         tui(conf, &machine, &blocks, cfg)?;
     } else {
         let ret = conf.run(&machine, &blocks, cfg);
+        println!("{conf}");
         dbg!(&ret);
     }
 
@@ -392,7 +418,7 @@ fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: C
 
         match keys.next().unwrap().unwrap() {
             Key::Char('q') => break,
-            Key::Char('j') => {
+            Key::Char('j') if state.is_ok() || state.contains_err(&Err::StepLimit) => {
                 let step = 1 << speed;
                 cfg.sim_step_limit = conf.sim_step + step;
                 state = conf.run(machine, blocks, cfg);
@@ -413,6 +439,50 @@ fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: C
         }
     }
     write!(screen, "{}", termion::cursor::Show).unwrap();
+    Ok(())
+}
+
+#[allow(unused)]
+fn transcode() -> Result<()> {
+    let file = File::open("/home/univerz/projects/bbc/no1_3_21")?;
+    let lines = BufReader::new(file).lines();
+
+    for line in lines {
+        let line = String::from_utf8(strip_ansi_escapes::strip(line?)?)?;
+        // dbg!(&line);
+        let conf: Configuration = line.parse()?;
+        // dbg!(&conf);
+
+        fn fmt_symbol(item: &Item) {
+            match *item {
+                Item::S(s) => print!("{}", s.italic()),
+                Item::Exp { block, exp, visited } => {
+                    if block > 0 {
+                        print!(" {}", ((block + b'a') as char).yellow().bold());
+                        let exp_ = if visited { format!("{}", exp.bold()) } else { format!("{}", exp) };
+                        if exp > 1_000_000_000 {
+                            print!("^{} ", exp_.bright_white());
+                        } else {
+                            print!("^{} ", exp_);
+                        }
+                    } else {
+                        if exp % 2 == 1 {
+                            print!("p");
+                        }
+                    }
+                    // if visited { write!(f, "^{} ", exp.bold()) } else { write!(f, "^{} ", exp) }
+                }
+                Item::Unreachable => print!(" {} ", '!'.bright_red()),
+            }
+        }
+
+        print!("{}:  ", conf.sim_step);
+        conf.tape[0].iter().for_each(|item| fmt_symbol(item));
+        print!(" {} ", conf.head.bright_green().bold());
+        conf.tape[1].iter().rev().for_each(|item| fmt_symbol(item));
+        println!();
+    }
+
     Ok(())
 }
 
