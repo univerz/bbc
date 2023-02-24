@@ -500,16 +500,11 @@ mod tests {
 
     #[test]
     fn parse_conf() -> Result<()> {
-        for inp in ["1111 a^7 01 a^3 11 b^14 11 b^20 11 a^137 0101 C> 0 a^3117 10 a^141880 !", " 0 <A 1"] {
+        for inp in ["0: 1111 a^7 01 a^3 11 b^14 11 b^20 11 a^137 0101 C> 0 a^3117 10 a^141880 !", "0: 0 <A 1"] {
             let conf: Configuration = inp.parse()?;
             assert_eq!(
                 inp.split_whitespace().collect::<String>(),
-                String::from_utf8(strip_ansi_escapes::strip(conf.to_string())?)?
-                    .split_once(':')
-                    .unwrap()
-                    .1
-                    .split_whitespace()
-                    .collect::<String>()
+                String::from_utf8(strip_ansi_escapes::strip(conf.to_string())?)?.split_whitespace().collect::<String>()
             );
         }
         Ok(())
