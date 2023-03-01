@@ -29,6 +29,10 @@ enum Item {
     X(usize),
     /// 1-run-length encoding; `L(2332)` == `011 0111 0111 011`
     L(u16),
+    E {
+        block: u8,
+        exp: usize,
+    },
     Unreachable,
 }
 
@@ -72,6 +76,11 @@ impl Configuration {
             dir: Direction::Right,
             sim_step: 0,
         }
+    }
+
+    fn compress(tape: &mut Tape) {
+        // 2 x^7640 D x^10344
+        //   x^72142 D x^3076 D x^1538 D x^300 D x^30826 D x^72142 D x^3076 D x^1538 D x^300 D x^30826 D
     }
 
     fn run(&mut self, _machine: &Machine, _blocks: RefBlocks, cfg: Config) -> Result<(), Err> {
@@ -125,6 +134,12 @@ impl Configuration {
                     self.dir = Left;
                 }
 
+                // `> D33` -> `P0 >` // $ cargo run --release --bin on2 8 0 --conf "! A> 11010 1010 1010 !"
+                (Right, _, [.., Item::C(3), Item::C(3), Item::D]) => {
+                    self.rtape.truncate(self.rtape.len() - 3);
+                    self.ltape.push(Item::P);
+                    self.ltape.push(Item::C(0));
+                }
                 // `> D3` -> `xP >`
                 (Right, _, [.., Item::C(3), Item::D]) => {
                     self.rtape.truncate(self.rtape.len() - 2);
@@ -187,6 +202,47 @@ impl Configuration {
                     self.rtape.push(Item::P);
                     self.ltape.push(Item::L(2301));
                     self.ltape.push(Item::D);
+                }
+                // `> PDDx` -> `21D > ` // $ cargo run --release --bin on2 8 0 --conf "! A> 110 11010 11010 110110 !" ... 63:   !  a^1 11 a^2 001 a^1 01 A>  !
+                (Right, _, [.., Item::X(exp), Item::D, Item::D, Item::P]) => {
+                    pop_x_truncate!(rtape, exp, 3);
+                    self.ltape.push(Item::C(2));
+                    self.ltape.push(Item::C(1));
+                    self.ltape.push(Item::D);
+                }
+                // `2 > 3` (== `13 <`) -> `L(432) >` // $ cargo run --release --bin on2 8 0 --conf "! 011 0111 011 A> 1010 !"
+                (Right, [.., Item::C(2)], [.., Item::C(3)]) => {
+                    self.ltape.pop();
+                    self.ltape.push(Item::L(432));
+                    self.rtape.pop();
+                }
+                // `L(432) <` -> `L(401) x >` // $ cargo run --release --bin on2 8 0 --conf "! 011110111 a^1 <C 10 !"
+                (Left, [.., Item::L(432)], _) => {
+                    self.ltape.pop();
+                    self.ltape.push(Item::L(401));
+                    self.ltape.push(Item::X(1));
+                    self.dir = Right;
+                }
+                // `L(401) <` -> `L(62) >` // $ cargo run --release --bin on2 8 0 --conf "! 01111001 <C 10 !"
+                (Left, [.., Item::L(401)], _) => {
+                    self.ltape.pop();
+                    self.ltape.push(Item::L(62));
+                    self.dir = Right;
+                }
+                // `L(62) <` -> `L(31) x >` // $ cargo run --release --bin on2 8 0 --conf "! 0111111 a^1 <C 10 !"
+                (Left, [.., Item::L(62)], _) => {
+                    self.ltape.pop();
+                    self.ltape.push(Item::L(31));
+                    self.ltape.push(Item::X(1));
+                    self.dir = Right;
+                }
+                // `x L(31) <` -> `P1D >` // $ cargo run --release --bin on2 8 0 --conf "! 011011 011101 <C 10 !"
+                (Left, [.., Item::X(exp), Item::L(31)], _) => {
+                    pop_x_truncate!(ltape, exp, 1);
+                    self.ltape.push(Item::P);
+                    self.ltape.push(Item::C(1));
+                    self.ltape.push(Item::D);
+                    self.dir = Right;
                 }
 
                 // `> P x^n` -> `x^n > P`
@@ -277,6 +333,7 @@ impl fmt::Display for Configuration {
                     }
                 }
                 Item::L(r) => write!(f, " L({r}) "),
+                Item::E { block, exp } => write!(f, " {}^{} ", ((block + b'a') as char).yellow().bold(), exp),
                 Item::Unreachable => write!(f, " {} ", '!'.bright_red()),
             }
         }
