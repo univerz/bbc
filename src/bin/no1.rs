@@ -7,6 +7,7 @@ use owo_colors::OwoColorize;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Write};
+use std::str::FromStr;
 use termion::{event::Key, input::TermRead, raw::IntoRawMode, screen::IntoAlternateScreen};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -14,6 +15,7 @@ pub enum Err {
     Halt,
     StepLimit,
     Interesting,
+    UnknownTransition,
     Unreachable,
 }
 
@@ -29,6 +31,9 @@ enum Item {
     X(usize),
     /// 1-run-length encoding; `L(2332)` == `011 0111 0111 011`
     L(u16),
+    /// 0/a: `2 x^7640 D x^10344 ``
+    /// 1/b: `D x^72142 D x^3076 D x^1538 D x^300 D x^30826`
+    /// 2/c: `1D x^72141 1D x^3075 1D x^1537 1D x^299 1D x^30825`
     E {
         block: u8,
         exp: usize,
@@ -78,11 +83,6 @@ impl Configuration {
         }
     }
 
-    fn compress(tape: &mut Tape) {
-        // 2 x^7640 D x^10344
-        //   x^72142 D x^3076 D x^1538 D x^300 D x^30826 D x^72142 D x^3076 D x^1538 D x^300 D x^30826 D
-    }
-
     fn run(&mut self, _machine: &Machine, _blocks: RefBlocks, cfg: Config) -> Result<(), Err> {
         #[inline(always)]
         fn push_or_merge_x(tape: &mut Tape, new_exp: usize) {
@@ -128,9 +128,7 @@ impl Configuration {
                 // NEW `D > end` -> `< x` // $ cargo run --release --bin on2 4 0 --conf "! 011 01 A> 000 !" ... 6:   <C 10 a^2 !
                 (Right, [.., Item::D], []) => {
                     self.ltape.pop();
-                    self.rtape.push(Item::X(1));
-                    // self.rtape.push(Item::P);
-                    // self.rtape.push(Item::P);
+                    self.rtape.push(Item::X(1)); // || test Item::P + Item::P
                     self.dir = Left;
                 }
 
@@ -164,7 +162,16 @@ impl Configuration {
 
                 // CHANGED `x > 3` -> `0 >` // from `> x^n 3` -> `x^(n-1) 0 >`
                 (Right, [.., Item::X(exp)], [.., Item::C(3)]) => {
+                    let test_a = *exp == 10345; // --conf "2 x^7640 D x^10344 2 x^7640 D x^10344 1 x^7640 D x^10345 3 x^7639 D x^10347 3 < ! "
                     pop_x_truncate!(ltape, exp);
+                    if test_a && self.ltape.ends_with(&[Item::C(2), Item::X(7640), Item::D, Item::X(10344)]) {
+                        self.ltape.truncate(self.ltape.len() - 4);
+                        if let Some(Item::E { block: 0, exp }) = self.ltape.last_mut() {
+                            *exp = exp.checked_add(1).unwrap();
+                        } else {
+                            self.ltape.push(Item::E { block: 0, exp: 1 })
+                        }
+                    }
                     self.ltape.push(Item::C(0));
                     self.rtape.pop();
                 }
@@ -281,17 +288,62 @@ impl Configuration {
                     self.rtape.truncate(self.rtape.len() - 2);
                     push_or_merge_x(&mut self.ltape, 1);
                 }
-                // `> x` -> `x >`
-                (Right, _, [.., Item::X(exp)]) => {
-                    push_or_merge_x(&mut self.ltape, *exp);
-                    self.rtape.pop();
-                }
                 // `> D` -> `D >`
                 (Right, _, [.., Item::D]) => {
                     self.rtape.pop();
                     self.ltape.push(Item::D);
                 }
-                _ => unimplemented!(),
+                // `> x` -> `x >`
+                (Right, _, [.., Item::X(exp)]) => {
+                    let test_b = *exp == 30826; // --conf "2 > D x^598979953 PDP x^72142 D x^3076 D x^1538 D x^300 D x^30826 D x^42804942 D x^213427271 3 x^670661487 P"
+                    push_or_merge_x(&mut self.ltape, *exp);
+                    use Item::*;
+                    if test_b && self.ltape.ends_with(&[D, X(72142), D, X(3076), D, X(1538), D, X(300), D, X(30826)]) {
+                        self.ltape.truncate(self.ltape.len() - 10);
+                        if let Some(Item::E { block: 1, exp }) = self.ltape.last_mut() {
+                            *exp = exp.checked_add(1).unwrap();
+                        } else {
+                            self.ltape.push(Item::E { block: 1, exp: 1 })
+                        }
+                        // return Err(Err::Interesting);
+                    }
+                    self.rtape.pop();
+                }
+                // `> b` -> `b >`
+                (Right, _, [.., Item::E { block: 1, exp: move_exp }]) => {
+                    if let Some(Item::E { block: 1, exp }) = self.ltape.last_mut() {
+                        *exp = exp.checked_add(*move_exp).unwrap();
+                    } else {
+                        self.ltape.push(Item::E { block: 1, exp: *move_exp })
+                    }
+                    self.rtape.pop();
+                }
+                // `b < ` -> `< b`
+                (Left, [.., Item::E { block: 1, exp: move_exp }], _) => {
+                    self.rtape.push(Item::E { block: 1, exp: *move_exp });
+                    self.ltape.pop();
+                }
+                // `c^n < ` -> `c^(n-1) expanded-c <`
+                (Left, [.., Item::E { block: 2, exp }], _) => {
+                    *exp -= 1;
+                    if *exp == 0 {
+                        self.ltape.pop();
+                    }
+                    use Item::*;
+                    let e = [C(1), D, X(72141), C(1), D, X(3075), C(1), D, X(1537), C(1), D, X(299), C(1), D, X(30825)];
+                    self.ltape.extend_from_slice(&e); // NUDO: use extend() if Items gets bigger / allocates
+                }
+                (Left, [.., Item::Unreachable], _) | (Right, _, [.., Item::Unreachable]) => {
+                    return Err(Err::Unreachable);
+                }
+                // `> P b` -> c > P // --conf "! > P   D x^72142 D x^3076 D x^1538 D x^300 D x^30826   D !"
+                (Right, _, [.., Item::E { block: 1, exp: move_exp }, Item::P]) => {
+                    // -> "! 1D x^72141 1D x^3075 1D x^1537 1D x^299 1D x^30825  > P !"
+                    self.ltape.push(Item::E { block: 2, exp: *move_exp });
+                    self.rtape.truncate(self.rtape.len() - 2);
+                }
+
+                _ => return Err(Err::UnknownTransition),
             }
 
             self.sim_step += 1;
@@ -338,69 +390,81 @@ impl fmt::Display for Configuration {
             }
         }
 
-        write!(f, "{}:  ", self.sim_step)?;
+        write!(f, "{}:  ", self.sim_step.bright_white())?;
         self.ltape.iter().try_for_each(|item| fmt_symbol(item, f))?;
         write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
         self.rtape.iter().rev().try_for_each(|item| fmt_symbol(item, f))
     }
 }
 
-// fn raw_parse(s: &str) -> Result<(Configuration, usize)> {
-//     let mut conf = Configuration::new();
-//     let mut dir = Direction::Left.idx();
+fn raw_parse(s: &str) -> Result<(Configuration, Direction)> {
+    let mut conf = Configuration { ltape: Tape::new(), rtape: Tape::new(), dir: Direction::Right, sim_step: 0 };
+    let mut active_tape_dir = Direction::Left;
+    let mut tape = &mut conf.ltape;
 
-//     for token in s.split_whitespace() {
-//         if token.ends_with(":") {
-//             conf.sim_step = token[0..token.len() - 1].parse().unwrap();
-//             continue;
-//         }
-//         if token.contains('<') {
-//             dir += 1;
-//             conf.head.direction = Direction::Left;
-//             conf.head.state = token.chars().skip(1).next().unwrap() as u8 - b'A';
-//             continue;
-//         }
-//         if token.contains('>') {
-//             dir += 1;
-//             conf.head.direction = Direction::Right;
-//             conf.head.state = token.chars().next().unwrap() as u8 - b'A';
-//             continue;
-//         }
-//         if let Some((block, exp)) = token.split_once("^") {
-//             conf.tape[dir].push(Item::Exp {
-//                 block: block.chars().next().unwrap() as u8 - b'a',
-//                 exp: exp.parse()?,
-//                 visited: false,
-//             });
-//             continue;
-//         }
-//         if token == "!" {
-//             conf.tape[dir].push(Item::Unreachable);
-//             continue;
-//         }
-//         conf.tape[dir].extend(token.chars().map(|symbol| Item::S(symbol as u8 - b'0')))
-//     }
-//     Ok((conf, dir))
-// }
+    for token in s.split_whitespace() {
+        if token.ends_with(":") {
+            conf.sim_step = token[0..token.len() - 1].parse().unwrap();
+            continue;
+        }
+        if token == "<" {
+            assert_eq!(active_tape_dir, Direction::Left);
+            active_tape_dir = Direction::Right;
+            tape = &mut conf.rtape;
 
-// fn parse(s: &str) -> Result<Tape> {
-//     let (conf, dir) = raw_parse(s)?;
-//     assert_eq!(dir, Direction::Left.idx());
+            conf.dir = Direction::Left;
+            continue;
+        }
+        if token == ">" {
+            assert_eq!(active_tape_dir, Direction::Left);
+            active_tape_dir = Direction::Right;
+            tape = &mut conf.rtape;
 
-//     Ok(conf.tape.into_iter().next().unwrap())
-// }
+            conf.dir = Direction::Right;
+            continue;
+        }
+        if let Some((block, exp)) = token.split_once("^") {
+            if block == "x" {
+                tape.push(Item::X(exp.parse()?));
+            } else {
+                tape.push(Item::E { block: block.chars().next().unwrap() as u8 - b'a', exp: exp.parse()? });
+            }
+            continue;
+        }
+        if let Some(encoded) = token.strip_prefix("L(") {
+            tape.push(Item::L(encoded[..(encoded.len() - 1)].parse()?));
+            continue;
+        }
+        tape.extend(token.chars().map(|symbol| match symbol {
+            'D' => Item::D,
+            'P' => Item::P,
+            '0'..='9' => Item::C(symbol as u8 - b'0'),
+            'x' => Item::X(1),
+            '!' => Item::Unreachable,
+            _ => unreachable!(),
+        }));
+    }
+    Ok((conf, active_tape_dir))
+}
 
-// impl FromStr for Configuration {
-//     type Err = color_eyre::Report;
+fn parse(s: &str) -> Result<Tape> {
+    let (conf, dir) = raw_parse(s)?;
+    assert_eq!(dir, Direction::Left);
 
-//     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-//         let (mut conf, dir) = raw_parse(s)?;
-//         assert_eq!(dir, Direction::Right.idx());
-//         conf.tape[dir].reverse();
+    Ok(conf.ltape)
+}
 
-//         Ok(conf)
-//     }
-// }
+impl FromStr for Configuration {
+    type Err = color_eyre::Report;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let (mut conf, dir) = raw_parse(s)?;
+        assert_eq!(dir, Direction::Right);
+        conf.rtape.reverse();
+
+        Ok(conf)
+    }
+}
 
 #[derive(FromArgs, Debug)]
 /// Let's simulate
@@ -411,9 +475,9 @@ struct Args {
     /// how often to print configuration, 2^n
     #[argh(positional)]
     print_mod: u8,
-    // /// starting configuration
-    // #[argh(option, default = "Configuration::new()")]
-    // conf: Configuration,
+    /// starting configuration
+    #[argh(option, default = "Configuration::new()")]
+    conf: Configuration,
     /// tui mode
     #[argh(switch, short = 't')]
     tui: bool,
@@ -426,8 +490,8 @@ struct Config {
 }
 
 // new run:               cargo run --release --bin no1 60 30
-// explore configuration: cargo run --release --bin no1 8 0 --conf "!  A> a^4 1010 a^2 11"
-// explore in tui:        cargo run --release --bin no1 8 0 --conf "a^61652 10 E>  d^11104" --tui
+// explore configuration: cargo run --release --bin no1 8 0 --conf "2 x^7640 D x^10344 2 x^7640 D x^10344 1 x^7640 D x^10345 3 x^7639 D x^10347 3 < ! "
+// explore in tui:        cargo run --release --bin no1 8 0 --conf "1 > P" --tui
 fn main() -> Result<()> {
     color_eyre::install()?;
 
@@ -436,8 +500,7 @@ fn main() -> Result<()> {
     let machine = Machine::from("1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC");
     let args: Args = argh::from_env();
     let cfg = Config { sim_step_limit: 2usize.checked_pow(args.sim_step_limit).unwrap(), print_mod: args.print_mod };
-    // let mut conf = args.conf;
-    let mut conf = Configuration::new();
+    let mut conf = args.conf;
     // dbg!(cfg);
     println!("{}", conf);
 
@@ -470,7 +533,7 @@ fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: C
     write!(screen, "{}", termion::cursor::Hide).unwrap();
 
     let mut speed = cfg.print_mod;
-    cfg.print_mod = u8::MAX; // do not print inside conf::run
+    cfg.print_mod = 63; // do not print inside conf::run
 
     let mut keys = stdin.keys();
     let mut state: Result<(), Err> = Ok(());
@@ -515,27 +578,27 @@ fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: C
     Ok(())
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-//     #[test]
-//     fn parse_block() -> Result<()> {
-//         let mut b = parse("a^601 10 a^61653 10")?;
-//         b.reverse();
-//         assert_eq!(b, parse("01 a^61653 01 a^601 ")?);
-//         Ok(())
-//     }
+    #[test]
+    fn parse_block() -> Result<()> {
+        let mut b = parse("! x23 x^7640 DP x^10344 L(69)")?;
+        b.reverse();
+        assert_eq!(b, parse("L(69) x^10344 PD  x^7640 32x!")?);
+        Ok(())
+    }
 
-//     #[test]
-//     fn parse_conf() -> Result<()> {
-//         for inp in ["0: 1111 a^7 01 a^3 11 b^14 11 b^20 11 a^137 0101 C> 0 a^3117 10 a^141880 !", "0: 0 <A 1"] {
-//             let conf: Configuration = inp.parse()?;
-//             assert_eq!(
-//                 inp.split_whitespace().collect::<String>(),
-//                 String::from_utf8(strip_ansi_escapes::strip(conf.to_string())?)?.split_whitespace().collect::<String>()
-//             );
-//         }
-//         Ok(())
-//     }
-// }
+    #[test]
+    fn parse_conf() -> Result<()> {
+        for inp in ["0:  2 x^3 P a^4 DD x^167 31 x^17 L(432)  >  3 x^70 P", "0: 0 < 1 !"] {
+            let conf: Configuration = inp.parse()?;
+            assert_eq!(
+                inp.split_whitespace().collect::<String>(),
+                String::from_utf8(strip_ansi_escapes::strip(conf.to_string())?)?.split_whitespace().collect::<String>()
+            );
+        }
+        Ok(())
+    }
+}

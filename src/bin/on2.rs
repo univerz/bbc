@@ -397,7 +397,7 @@ fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: C
     write!(screen, "{}", termion::cursor::Hide).unwrap();
 
     let mut speed = cfg.print_mod;
-    cfg.print_mod = u8::MAX; // do not print inside conf::run
+    cfg.print_mod = 63; // do not print inside conf::run
 
     let mut keys = stdin.keys();
     let mut state: Result<(), Err> = Ok(());
