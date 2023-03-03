@@ -4,10 +4,12 @@
 use argh::FromArgs;
 use bbc::machine::{Direction, Machine};
 use color_eyre::eyre::Result;
+use itertools::Itertools;
 use owo_colors::OwoColorize;
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
 use std::str::FromStr;
 use termion::{event::Key, input::TermRead, raw::IntoRawMode, screen::IntoAlternateScreen};
 
@@ -442,30 +444,43 @@ impl Configuration {
     }
 }
 
+const DSP_ROTATE_TAPE: bool = false;
+const DSP_HIDE_X: bool = false;
+// const DSP_ROTATE_TAPE: bool = true;
+// const DSP_HIDE_X: bool = true;
+
+impl fmt::Display for Item {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Item::D => write!(f, "D"),
+            Item::P => write!(f, "P"),
+            Item::C(s) => write!(f, "{}", s.italic().bold()),
+            Item::X(exp) => {
+                if DSP_HIDE_X {
+                    return Ok(());
+                }
+                if exp > 1_000_000_000 { write!(f, " x^{} ", exp.bright_white()) } else { write!(f, " x^{} ", exp) }
+            }
+            Item::L(r) => write!(f, " L({r}) "),
+            Item::E { block, exp } => write!(f, " {}^{} ", ((block + b'a') as char).yellow().bold(), exp),
+            Item::Unreachable => write!(f, " {} ", '!'.bright_red()),
+        }
+    }
+}
+
 impl fmt::Display for Configuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fn fmt_symbol(item: &Item, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match *item {
-                Item::D => write!(f, "D"),
-                Item::P => write!(f, "P"),
-                Item::C(s) => write!(f, "{}", s.italic().bold()),
-                Item::X(exp) => {
-                    if exp > 1_000_000_000 {
-                        write!(f, " x^{} ", exp.bright_white())
-                    } else {
-                        write!(f, " x^{} ", exp)
-                    }
-                }
-                Item::L(r) => write!(f, " L({r}) "),
-                Item::E { block, exp } => write!(f, " {}^{} ", ((block + b'a') as char).yellow().bold(), exp),
-                Item::Unreachable => write!(f, " {} ", '!'.bright_red()),
-            }
+        if DSP_ROTATE_TAPE {
+            write!(f, "{}:  ", self.sim_step.bright_white())?;
+            self.rtape.iter().try_for_each(|item| write!(f, "{item}"))?;
+            write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
+            self.ltape.iter().rev().try_for_each(|item| write!(f, "{item}"))
+        } else {
+            write!(f, "{}:  ", self.sim_step.bright_white())?;
+            self.ltape.iter().try_for_each(|item| write!(f, "{item}"))?;
+            write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
+            self.rtape.iter().rev().try_for_each(|item| write!(f, "{item}"))
         }
-
-        write!(f, "{}:  ", self.sim_step.bright_white())?;
-        self.ltape.iter().try_for_each(|item| fmt_symbol(item, f))?;
-        write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
-        self.rtape.iter().rev().try_for_each(|item| fmt_symbol(item, f))
     }
 }
 
@@ -637,6 +652,46 @@ fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: C
         }
     }
     write!(screen, "{}", termion::cursor::Show).unwrap();
+    Ok(())
+}
+
+#[allow(unused)]
+fn transcode() -> Result<()> {
+    let file = File::open("/home/univerz/projects/bbc/.data/no1/no2_21")?;
+    let lines = BufReader::new(file).lines();
+
+    for line in lines {
+        let line = String::from_utf8(strip_ansi_escapes::strip(line?)?)?;
+        // dbg!(&line);
+        let conf: Configuration = line.parse()?;
+        // dbg!(&conf);
+
+        fn fmt_symbol(item: &Item) -> String {
+            match *item {
+                Item::X(_) => String::new(),
+                // Item::X(_) => format!("."),
+                Item::E { block, exp: _ } => format!("{}", ((block + b'a') as char).yellow().bold()),
+                _ => format!("{item}"),
+            }
+        }
+
+        let ltake = 500usize.saturating_sub(conf.rtape.len());
+        let mut conf = format!(
+            "{} {} {} {}",
+            conf.sim_step,
+            conf.rtape.iter().map(|item| fmt_symbol(item)).join(""),
+            conf.dir.bright_green().bold(),
+            conf.ltape.iter().rev().take(ltake).map(|item| fmt_symbol(item)).join("")
+        );
+        println!("{}", conf);
+
+        // print!("{}:  ", conf.sim_step);
+        // conf.ltape.iter().for_each(|item| fmt_symbol(item));
+        // print!(" {} ", conf.dir.bright_green().bold());
+        // conf.rtape.iter().rev().for_each(|item| fmt_symbol(item));
+        // println!();
+    }
+
     Ok(())
 }
 
