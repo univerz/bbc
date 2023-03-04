@@ -7,6 +7,7 @@ use color_eyre::eyre::Result;
 use itertools::Itertools;
 use owo_colors::OwoColorize;
 use std::collections::VecDeque;
+use std::cmp;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -55,6 +56,10 @@ struct Configuration {
     /// `<C 10` | `A>`
     dir: Direction,
     sim_step: usize,
+
+    // Stats
+    num_uni_cycles: usize,
+    num_strides: usize,
 }
 
 // >  xCC      ->  {2332}    >
@@ -74,7 +79,8 @@ impl Configuration {
         // ...
         // `28:  11001 <C 1011` == `C1 < P`
 
-        Configuration { ltape: vec![Item::C(1)], rtape: vec![Item::P], dir: Direction::Right, sim_step: 0 }
+        Configuration { ltape: vec![Item::C(1)], rtape: vec![Item::P], dir: Direction::Right, sim_step: 0,
+                        num_uni_cycles: 0, num_strides: 0 }
     }
 
     fn naive_accel_idxs(&self) -> Option<Vec<usize>> {
@@ -138,9 +144,135 @@ impl Configuration {
             }
             self.dir = Direction::Left;
 
+            self.num_strides += 1;
             true
         } else {
             false
+        }
+    }
+
+    // Count number of "strides" (applications of accelerate()) we could perform before a
+    // collision (considering only the right half of the tape).
+    fn count_accel_strides(&self) -> usize {
+        if !self
+            .rtape
+            .iter()
+            .skip(1)
+            .all(|item| matches!(item, Item::D | Item::X(_) | Item::C(3) | Item::E { block: 1, exp: _ }))
+        {
+            return 0;
+        }
+
+        let mut min_exp = 1;
+        let max_reps: Option<usize> = self
+            .rtape
+            .as_slice()
+            .windows(3)
+            .rev()
+            .filter_map(|w| match w {
+                [Item::X(_), Item::C(3), Item::X(exp_from)] => {
+                    let this_reps = *exp_from / min_exp;
+                    min_exp = min_exp.checked_shl(2)?;
+                    Some(this_reps)
+                }
+                [_, Item::C(3), _] => Some(0), // if there is a `3` then it should be in a valid position
+                _ => None,
+            })
+            .min();
+        if let Some(reps) = max_reps {
+            return reps;
+        } else {
+            // TODO: Maybe this should actually be usize::MAX? Like if there are no Cs on the right, there's no limit, each stride does nothing to right. Correct?
+            return 0;
+        }
+    }
+
+    // Apply multiple "strides" (applications of accelerate()) only to right hand side of tape.
+    // Used for @uni-cycle acceleration.
+    fn apply_multiple_strides(&mut self, num_strides : usize, idxs : Vec<usize>) {
+        let mut move_exp_value = num_strides;
+        for idx in idxs {
+            if let Some(Item::X(exp)) = self.rtape.get_mut(idx) {
+                *exp = exp.checked_add(move_exp_value << 1).unwrap();
+            } else {
+                unreachable!()
+            }
+            if let Some(Item::X(exp)) = self.rtape.get_mut(idx + 2) {
+                *exp -= move_exp_value
+            } else {
+                unreachable!()
+            }
+            move_exp_value = move_exp_value << 2;
+        }
+    }
+
+    // Attempt to apply the @uni-cycle
+    fn try_uni_cycle(&mut self) -> bool {
+        match (self.dir, self.ltape.as_slice(), self.rtape.as_slice()) {
+            // Example config:
+            //   84719:  ! a^1 1 x^7640 D x^10345 3 x^7639 D x^10347 3 x^7635 D x^10355 1 x^7618 D x^10389 2 x^7550 D x^10524 0 x^7279 D x^11066 3 x^6197 D x^13231 1 x^1866 DD x^7713 0 x^95 2D x^598586766 1D >  x^300 D x^30826  b^8 D x^42804942 D x^3076 D x^1538 D x^300 D x^21397226 D x^13012670 D x^2139716 D x^1069858 D x^213964 D x^21621178 D x^3440996 D x^1720498 D x^344092 D x^1414318 D x^223068 D x^211854560 3 x^673806909 P
+            (Direction::Right,
+                [.., Item::E { block: 0, .. },
+                    Item::C(1), Item::X(7640), Item::D, Item::X(10345),
+                    Item::C(3), Item::X(7639), Item::D, Item::X(10347),
+                    Item::C(3), Item::X(7635), Item::D, Item::X(10355),
+                    Item::C(1), Item::X(7618), Item::D, Item::X(10389),
+                    Item::C(2), Item::X(7550), Item::D, Item::X(10524),
+                    Item::C(0), Item::X(7279), Item::D, Item::X(11066),
+                    Item::C(3), Item::X(6197), Item::D, Item::X(13231),
+                    Item::C(1), Item::X(1866), Item::D, Item::D, Item::X(7713),
+                    Item::C(0), Item::X(95),
+                    Item::C(2), Item::D, Item::X(big_count),
+                    Item::C(1), Item::D],
+                [.., Item::E { block: 1, .. },
+                    Item::X(30826), Item::D, Item::X(300)]) => {
+                // Each cycle reduces big_count by UNI_CYCLE_REDUCE and strides UNI_CYCLE_STRIDE times.
+                const UNI_CYCLE_REDUCE : usize = 53946;
+                const UNI_CYCLE_STRIDE : usize = 53946 * 4 - 5;
+                // max cycles before big_count is too small.
+                let max_cycles_left = *big_count / UNI_CYCLE_REDUCE;
+                // max_strides is max times we can stride before there is a crash on right side.
+                let max_strides = self.count_accel_strides();
+                let max_cycles_right = max_strides / UNI_CYCLE_STRIDE;
+                // We cycle until one of the two above is imminent.
+                let num_cycles = cmp::min(max_cycles_left, max_cycles_right);
+                // println!("max_cycles_left: {:?}  /  max_cycles_right: {:?}  /  num_cycles: {:?}", max_cycles_left, max_cycles_right, num_cycles);
+                if num_cycles > 0 {
+                    // Apply updates to left half of tape.
+                    // Note: we must do a second, mutable match to satisfy the borrowing logic.
+                    match (self.ltape.as_mut_slice(), self.rtape.as_mut_slice()) {
+                        ([.., Item::E { block: 0, exp: a_count },
+                            Item::C(1), Item::X(7640), Item::D, Item::X(10345),
+                            Item::C(3), Item::X(7639), Item::D, Item::X(10347),
+                            Item::C(3), Item::X(7635), Item::D, Item::X(10355),
+                            Item::C(1), Item::X(7618), Item::D, Item::X(10389),
+                            Item::C(2), Item::X(7550), Item::D, Item::X(10524),
+                            Item::C(0), Item::X(7279), Item::D, Item::X(11066),
+                            Item::C(3), Item::X(6197), Item::D, Item::X(13231),
+                            Item::C(1), Item::X(1866), Item::D, Item::D, Item::X(7713),
+                            Item::C(0), Item::X(95),
+                            Item::C(2), Item::D, Item::X(big_count),
+                            Item::C(1), Item::D],
+                        [.., Item::E { block: 1, exp: b_count },
+                            Item::X(30826), Item::D, Item::X(300)]) => {
+                            *big_count -= num_cycles * UNI_CYCLE_REDUCE;
+                            *a_count += num_cycles;
+                            *b_count += num_cycles;
+                        }
+                        _ => unreachable!()
+                    }
+                    // Apply updates to right half of tape.
+                    let to_exp_idxs : Vec<usize> = self.naive_accel_idxs().unwrap();
+                    self.apply_multiple_strides(num_cycles * UNI_CYCLE_STRIDE, to_exp_idxs);
+                    self.num_uni_cycles += 1;
+                    return true;
+                }
+                return false;
+            }
+            _ => {
+                // We are not in a @uni-cycle.
+                return false;
+            }
         }
     }
 
@@ -423,6 +555,7 @@ impl Configuration {
                 // -> "! 1D x^72141 1D x^3075 1D x^1537 1D x^299 1D x^30825  > P !"
                 self.ltape.push(Item::E { block: 2, exp: *move_exp });
                 pop_n(&mut self.rtape, 2);
+                self.rtape.push(Item::P);
             }
 
             _ => return Err(Err::UnknownTransition),
@@ -430,11 +563,21 @@ impl Configuration {
         Ok(())
     }
 
+    fn gen_step(&mut self, cfg: Config) -> Result<(), Err> {
+        if cfg.accel_uni_cycles {
+            if self.try_uni_cycle() {
+                return Ok(());
+            }
+        }
+        if self.accelerate() {
+            return Ok(());
+        }
+        self.step()
+    }
+
     fn run(&mut self, _machine: &Machine, _blocks: RefBlocks, cfg: Config) -> Result<(), Err> {
         while self.sim_step < cfg.sim_step_limit {
-            if !self.accelerate() {
-                self.step()?;
-            }
+            self.gen_step(cfg)?;
             self.sim_step += 1;
             if self.sim_step & ((1 << cfg.print_mod) - 1) == 0 {
                 println!("{self}");
@@ -470,13 +613,13 @@ impl fmt::Display for Item {
 
 impl fmt::Display for Configuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ", self.sim_step.bright_white())?;
+        write!(f, "({}, {}):  ", self.num_strides, self.num_uni_cycles)?;
         if DSP_ROTATE_TAPE {
-            write!(f, "{}:  ", self.sim_step.bright_white())?;
             self.rtape.iter().try_for_each(|item| write!(f, "{item}"))?;
             write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
             self.ltape.iter().rev().try_for_each(|item| write!(f, "{item}"))
         } else {
-            write!(f, "{}:  ", self.sim_step.bright_white())?;
             self.ltape.iter().try_for_each(|item| write!(f, "{item}"))?;
             write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
             self.rtape.iter().rev().try_for_each(|item| write!(f, "{item}"))
@@ -485,7 +628,8 @@ impl fmt::Display for Configuration {
 }
 
 fn raw_parse(s: &str) -> Result<(Configuration, Direction)> {
-    let mut conf = Configuration { ltape: Tape::new(), rtape: Tape::new(), dir: Direction::Right, sim_step: 0 };
+    let mut conf = Configuration { ltape: Tape::new(), rtape: Tape::new(), dir: Direction::Right, sim_step: 0,
+                                   num_strides: 0, num_uni_cycles: 0 };
     let mut active_tape_dir = Direction::Left;
     let mut tape = &mut conf.ltape;
 
@@ -568,12 +712,18 @@ struct Args {
     /// tui mode
     #[argh(switch, short = 't')]
     tui: bool,
+
+    #[argh(switch, short = 'x', description = "interpret step limit and print limit as 2^n?")]
+    exponential_steps: bool,
+    #[argh(switch, short = 'c', description = "accelerate @uni-cycles")]
+    accel_uni_cycles: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Config {
     sim_step_limit: usize,
     print_mod: u8,
+    accel_uni_cycles: bool,
 }
 
 // new run:               cargo run --release --bin no1 60 30
@@ -586,7 +736,13 @@ fn main() -> Result<()> {
 
     let machine = Machine::from("1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC");
     let args: Args = argh::from_env();
-    let cfg = Config { sim_step_limit: 2usize.checked_pow(args.sim_step_limit).unwrap(), print_mod: args.print_mod };
+    let sim_step_limit = if args.exponential_steps {
+        2usize.checked_pow(args.sim_step_limit).unwrap()
+    } else {
+        args.sim_step_limit.try_into().unwrap()
+    };
+    let cfg = Config { sim_step_limit: sim_step_limit, print_mod: args.print_mod,
+                       accel_uni_cycles: args.accel_uni_cycles };
     let mut conf = args.conf;
     // dbg!(cfg);
     println!("{}", conf);
@@ -632,13 +788,13 @@ fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: C
         match keys.next().unwrap().unwrap() {
             Key::Char('q') => break,
             Key::Char('j') if state.is_ok() || state.contains_err(&Err::StepLimit) => {
+                history.push_front((speed, state, conf.clone()));
                 let step = 1 << speed;
                 cfg.sim_step_limit = conf.sim_step + step;
                 state = conf.run(machine, blocks, cfg);
                 if history.len() > 1_000_000 {
                     history.pop_back();
                 }
-                history.push_front((speed, state, conf.clone()));
             }
             Key::Char('k') => {
                 if let Some((_, s, c)) = history.pop_front() {
