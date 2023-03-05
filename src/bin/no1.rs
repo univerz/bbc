@@ -106,6 +106,8 @@ impl SimStats {
         let log_collision_time = (collision_time + 1).ilog2();
         let index: usize = log_collision_time.clamp(0, 19).try_into().unwrap();
         self.log2_collision_times_hist[index] += 1;
+
+        self.last_collision_incr = self.num_counter_increments;
     }
 }
 
@@ -215,7 +217,7 @@ impl Configuration {
         }
 
         let mut min_exp = 1;
-        rtape
+        let max_reps = rtape
             .windows(3)
             .rev()
             .filter_map(|w| match w {
@@ -228,8 +230,13 @@ impl Configuration {
                 [_, Item::C(3), _] => Some(0), // if there is a `3` then it should be in a valid position
                 _ => None,
             })
-            .min()
-            .unwrap_or(Exp::MAX)
+            .min();
+        if let Some(reps) = max_reps {
+            return reps;
+        } else {
+            // This is the case where there are no Cs on the right. In that case we can do infinite strides b/c there are no Cs to collide!
+            return Exp::MAX;
+        }
     }
 
     // Apply multiple "strides" (applications of accelerate()) only to right hand side of tape.
@@ -291,8 +298,17 @@ impl Configuration {
                     *b_count = b_count.checked_add(num_cycles).unwrap();
 
                     // Apply updates to right half of tape.
-                    if let Some(to_exp_idxs) = self.naive_accel_idxs() {
-                        self.apply_multiple_strides(num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap(), to_exp_idxs);
+                    let num_strides = num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap();
+                    if let Some(idxs) = self.naive_accel_idxs() {
+                        self.apply_multiple_strides(num_strides, idxs);
+                    } else {
+                        // The only reason that this can fail naive_accel_idxs() is if there are no Cs to the right, in which case striding is easy :)
+                        assert!(self
+                            .rtape
+                            .iter()
+                            .skip(1)
+                            .all(|item| matches!(item, Item::D | Item::X(_) | Item::E { block: 1, exp: _ })));
+                        self.stats.num_counter_increments = self.stats.num_counter_increments.checked_add(num_strides).unwrap();
                     }
                     return true;
                 }
@@ -417,17 +433,6 @@ impl Configuration {
                         self.stats.num_a_create += 1;
                     }
                 }
-                self.ltape.push(Item::C(0));
-                self.rtape.pop();
-            }
-            // `b^n > 3` -> `b^(n-1) D x^72142 D x^3076 D x^1538 D x^300 D x^30825 0 >`
-            (Right, [.., Item::E { block: 1, exp }], [.., Item::C(3)]) => {
-                *exp -= 1;
-                if *exp == 0 {
-                    self.ltape.pop();
-                }
-                use Item::*;
-                self.ltape.extend_from_slice(&[D, X(72142), D, X(3076), D, X(1538), D, X(300), D, X(30825)]); // 30826 -> 30825
                 self.ltape.push(Item::C(0));
                 self.rtape.pop();
             }
@@ -593,6 +598,16 @@ impl Configuration {
                 let e = [C(1), D, X(72141), C(1), D, X(3075), C(1), D, X(1537), C(1), D, X(299), C(1), D, X(30825)];
                 self.ltape.extend_from_slice(&e); // NUDO: use extend() if Items gets bigger / allocates
             }
+            // `b^n > 3` -> `b^(n-1) expanded-b > 3`
+            (Right, [.., Item::E { block: 1, exp }], [.., Item::C(3)]) => {
+                *exp -= 1;
+                if *exp == 0 {
+                    self.ltape.pop();
+                }
+                use Item::*;
+                let e = [D, X(72142), D, X(3076), D, X(1538), D, X(300), D, X(30826)];
+                self.ltape.extend_from_slice(&e); // NUDO: use extend() if Items gets bigger / allocates
+            }
             (Left, [.., Item::Unreachable], _) | (Right, _, [.., Item::Unreachable]) => {
                 return Err(Err::Unreachable);
             }
@@ -690,14 +705,13 @@ impl fmt::Display for SimStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Stats({:.2e}, {}, {}, {}, {}, {}, {:?})",
+            "Stats({}, {}, {}, {}, {}, {})",
             self.num_counter_increments.blue(),
             self.num_collisions.blue(),
             self.num_strides.blue(),
             self.num_uni_cycles.blue(),
             self.num_a_create.blue(),
             self.num_c_create.blue(),
-            self.log2_collision_times_hist,
         )
     }
 }
