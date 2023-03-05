@@ -6,8 +6,8 @@ use bbc::machine::{Direction, Machine};
 use color_eyre::eyre::Result;
 use itertools::Itertools;
 use owo_colors::OwoColorize;
-use std::collections::VecDeque;
 use std::cmp;
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
@@ -79,8 +79,14 @@ impl Configuration {
         // ...
         // `28:  11001 <C 1011` == `C1 < P`
 
-        Configuration { ltape: vec![Item::C(1)], rtape: vec![Item::P], dir: Direction::Right, sim_step: 0,
-                        num_uni_cycles: 0, num_strides: 0 }
+        Configuration {
+            ltape: vec![Item::C(1)],
+            rtape: vec![Item::P],
+            dir: Direction::Right,
+            sim_step: 0,
+            num_uni_cycles: 0,
+            num_strides: 0,
+        }
     }
 
     fn naive_accel_idxs(&self) -> Option<Vec<usize>> {
@@ -189,7 +195,7 @@ impl Configuration {
 
     // Apply multiple "strides" (applications of accelerate()) only to right hand side of tape.
     // Used for @uni-cycle acceleration.
-    fn apply_multiple_strides(&mut self, num_strides : usize, idxs : Vec<usize>) {
+    fn apply_multiple_strides(&mut self, num_strides: usize, idxs: Vec<usize>) {
         let mut move_exp_value = num_strides;
         for idx in idxs {
             if let Some(Item::X(exp)) = self.rtape.get_mut(idx) {
@@ -211,6 +217,7 @@ impl Configuration {
         match (self.dir, self.ltape.as_slice(), self.rtape.as_slice()) {
             // Example config:
             //   84719:  ! a^1 1 x^7640 D x^10345 3 x^7639 D x^10347 3 x^7635 D x^10355 1 x^7618 D x^10389 2 x^7550 D x^10524 0 x^7279 D x^11066 3 x^6197 D x^13231 1 x^1866 DD x^7713 0 x^95 2D x^598586766 1D >  x^300 D x^30826  b^8 D x^42804942 D x^3076 D x^1538 D x^300 D x^21397226 D x^13012670 D x^2139716 D x^1069858 D x^213964 D x^21621178 D x^3440996 D x^1720498 D x^344092 D x^1414318 D x^223068 D x^211854560 3 x^673806909 P
+            #[rustfmt::skip]
             (Direction::Right,
                 [.., Item::E { block: 0, .. },
                     Item::C(1), Item::X(7640), Item::D, Item::X(10345),
@@ -628,8 +635,14 @@ impl fmt::Display for Configuration {
 }
 
 fn raw_parse(s: &str) -> Result<(Configuration, Direction)> {
-    let mut conf = Configuration { ltape: Tape::new(), rtape: Tape::new(), dir: Direction::Right, sim_step: 0,
-                                   num_strides: 0, num_uni_cycles: 0 };
+    let mut conf = Configuration {
+        ltape: Tape::new(),
+        rtape: Tape::new(),
+        dir: Direction::Right,
+        sim_step: 0,
+        num_strides: 0,
+        num_uni_cycles: 0,
+    };
     let mut active_tape_dir = Direction::Left;
     let mut tape = &mut conf.ltape;
 
@@ -741,8 +754,8 @@ fn main() -> Result<()> {
     } else {
         args.sim_step_limit.try_into().unwrap()
     };
-    let cfg = Config { sim_step_limit: sim_step_limit, print_mod: args.print_mod,
-                       accel_uni_cycles: args.accel_uni_cycles };
+    let cfg =
+        Config { sim_step_limit: sim_step_limit, print_mod: args.print_mod, accel_uni_cycles: args.accel_uni_cycles };
     let mut conf = args.conf;
     // dbg!(cfg);
     println!("{}", conf);
