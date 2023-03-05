@@ -23,6 +23,8 @@ pub enum Err {
     Unreachable,
 }
 
+type Exp = u128;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Item {
     /// left: `011 01`, right: `110 10`
@@ -32,7 +34,7 @@ enum Item {
     /// 0: `011 0111 011`, 1: `011 0 01`, 2: `01111 011`, 3: `01 01`
     C(u8),
     /// `(011 011)^n`
-    X(usize),
+    X(Exp),
     /// 1-run-length encoding; `L(2332)` == `011 0111 0111 011`
     L(u16),
     /// 0/a: `2 x^7640 D x^10344 ``
@@ -40,7 +42,7 @@ enum Item {
     /// 2/c: `1D x^72141 1D x^3075 1D x^1537 1D x^299 1D x^30825`
     E {
         block: u8,
-        exp: usize,
+        exp: Exp,
     },
     Unreachable,
 }
@@ -115,7 +117,7 @@ impl Configuration {
             .filter_map(|(idx, w)| match w {
                 [Item::X(_), Item::C(3), Item::X(exp_from)] => {
                     if *exp_from > min_exp {
-                        min_exp = min_exp.checked_shl(2)?;
+                        min_exp = min_exp.checked_shl(2).unwrap();
                         Some(Some(idx))
                     } else {
                         Some(None)
@@ -159,7 +161,7 @@ impl Configuration {
 
     // Count number of "strides" (applications of accelerate()) we could perform before a
     // collision (considering only the right half of the tape).
-    fn count_accel_strides(&self) -> usize {
+    fn count_accel_strides(&self) -> Exp {
         if !self
             .rtape
             .iter()
@@ -170,15 +172,16 @@ impl Configuration {
         }
 
         let mut min_exp = 1;
-        let max_reps: Option<usize> = self
+        let max_reps: Option<Exp> = self
             .rtape
             .as_slice()
             .windows(3)
             .rev()
             .filter_map(|w| match w {
                 [Item::X(_), Item::C(3), Item::X(exp_from)] => {
-                    let this_reps = *exp_from / min_exp;
-                    min_exp = min_exp.checked_shl(2)?;
+                    let this_reps = (exp_from.saturating_sub(1)) / min_exp;
+                    // let this_reps = *exp_from / min_exp;
+                    min_exp = min_exp.checked_shl(2).unwrap();
                     Some(this_reps)
                 }
                 [_, Item::C(3), _] => Some(0), // if there is a `3` then it should be in a valid position
@@ -195,11 +198,11 @@ impl Configuration {
 
     // Apply multiple "strides" (applications of accelerate()) only to right hand side of tape.
     // Used for @uni-cycle acceleration.
-    fn apply_multiple_strides(&mut self, num_strides: usize, idxs: Vec<usize>) {
+    fn apply_multiple_strides(&mut self, num_strides: Exp, idxs: Vec<usize>) {
         let mut move_exp_value = num_strides;
         for idx in idxs {
             if let Some(Item::X(exp)) = self.rtape.get_mut(idx) {
-                *exp = exp.checked_add(move_exp_value << 1).unwrap();
+                *exp = exp.checked_add(move_exp_value.checked_shl(1).unwrap()).unwrap();
             } else {
                 unreachable!()
             }
@@ -208,7 +211,7 @@ impl Configuration {
             } else {
                 unreachable!()
             }
-            move_exp_value = move_exp_value << 2;
+            move_exp_value = move_exp_value.checked_shl(2).unwrap();
         }
     }
 
@@ -234,8 +237,8 @@ impl Configuration {
                 [.., Item::E { block: 1, .. },
                     Item::X(30826), Item::D, Item::X(300)]) => {
                 // Each cycle reduces big_count by UNI_CYCLE_REDUCE and strides UNI_CYCLE_STRIDE times.
-                const UNI_CYCLE_REDUCE : usize = 53946;
-                const UNI_CYCLE_STRIDE : usize = 53946 * 4 - 5;
+                const UNI_CYCLE_REDUCE : Exp = 53946;
+                const UNI_CYCLE_STRIDE : Exp = 53946 * 4 - 5;
                 // max cycles before big_count is too small.
                 let max_cycles_left = *big_count / UNI_CYCLE_REDUCE;
                 // max_strides is max times we can stride before there is a crash on right side.
@@ -262,15 +265,15 @@ impl Configuration {
                             Item::C(1), Item::D],
                         [.., Item::E { block: 1, exp: b_count },
                             Item::X(30826), Item::D, Item::X(300)]) => {
-                            *big_count -= num_cycles * UNI_CYCLE_REDUCE;
-                            *a_count += num_cycles;
-                            *b_count += num_cycles;
+                            *big_count -= num_cycles.checked_mul(UNI_CYCLE_REDUCE).unwrap();
+                            *a_count = a_count.checked_add(num_cycles).unwrap();
+                            *b_count = b_count.checked_add(num_cycles).unwrap();
                         }
                         _ => unreachable!()
                     }
                     // Apply updates to right half of tape.
                     let to_exp_idxs : Vec<usize> = self.naive_accel_idxs().unwrap();
-                    self.apply_multiple_strides(num_cycles * UNI_CYCLE_STRIDE, to_exp_idxs);
+                    self.apply_multiple_strides(num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap(), to_exp_idxs);
                     self.num_uni_cycles += 1;
                     return true;
                 }
@@ -285,7 +288,7 @@ impl Configuration {
 
     fn step(&mut self) -> Result<(), Err> {
         #[inline(always)]
-        fn push_or_merge_x(tape: &mut Tape, new_exp: usize) {
+        fn push_or_merge_x(tape: &mut Tape, new_exp: Exp) {
             if let Some(Item::X(exp)) = tape.last_mut() {
                 *exp = exp.checked_add(new_exp).unwrap();
             } else {
@@ -621,7 +624,7 @@ impl fmt::Display for Item {
 impl fmt::Display for Configuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ", self.sim_step.bright_white())?;
-        write!(f, "({}, {}):  ", self.num_strides, self.num_uni_cycles)?;
+        write!(f, "({}, {}):  ", self.num_strides.blue(), self.num_uni_cycles.blue())?;
         if DSP_ROTATE_TAPE {
             self.rtape.iter().try_for_each(|item| write!(f, "{item}"))?;
             write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
