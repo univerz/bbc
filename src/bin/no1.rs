@@ -65,6 +65,13 @@ struct SimStats {
     num_a_create: u64,
     // Number of times a new `c^n` block is created (from `>P b^n -> c^n >P`).
     num_c_create: u64,
+
+    // Collisions
+    // Number of collisions that have occurred (only non-@uni-cycle ones for now).
+    num_collisions: Exp,
+    last_collision_incr: Exp,
+    // log2(collision_time + 1)
+    log2_collision_times_hist: [Exp; 20],
 }
 
 #[derive(Clone, Debug)]
@@ -80,7 +87,25 @@ struct Configuration {
 
 impl SimStats {
     pub fn new() -> SimStats {
-        SimStats { num_counter_increments: 0, num_strides: 0, num_uni_cycles: 0, num_a_create: 0, num_c_create: 0 }
+        SimStats {
+            num_counter_increments: 0,
+            num_strides: 0,
+            num_uni_cycles: 0,
+            num_a_create: 0,
+            num_c_create: 0,
+            num_collisions: 0,
+            last_collision_incr: 0,
+            log2_collision_times_hist: [0; 20],
+        }
+    }
+
+    fn record_collision(&mut self) {
+        self.num_collisions += 1;
+
+        let collision_time = self.num_counter_increments - self.last_collision_incr;
+        let log_collision_time = (collision_time + 1).ilog2();
+        let index: usize = log_collision_time.clamp(0, 19).try_into().unwrap();
+        self.log2_collision_times_hist[index] += 1;
     }
 }
 
@@ -341,12 +366,14 @@ impl Configuration {
                 pop_n(&mut self.rtape, 3);
                 self.ltape.push(Item::P);
                 self.ltape.push(Item::C(0));
+                self.stats.record_collision();
             }
             // `> D3` -> `xP >`
             (Right, _, [.., Item::C(3), Item::D]) => {
                 pop_n(&mut self.rtape, 2);
                 push_or_merge_x(&mut self.ltape, 1);
                 self.ltape.push(Item::P);
+                self.stats.record_collision();
             }
 
             // `x < ` -> `< x` // x now needs merge in this direction because of acceleration
@@ -403,6 +430,7 @@ impl Configuration {
                 self.ltape.pop();
                 self.ltape.push(Item::L(2332));
                 self.rtape.pop();
+                self.stats.record_collision();
             }
             // `L(2332) <` -> `L(2301) x >` // $ cargo run --release --bin on2 8 0 --conf "! 01101110111 a^1 <C 10 !"
             (Left, [.., Item::L(2332)], _) => {
@@ -444,6 +472,7 @@ impl Configuration {
                 self.ltape.pop();
                 self.ltape.push(Item::L(432));
                 self.rtape.pop();
+                self.stats.record_collision();
             }
             // `L(432) <` -> `L(401) x >` // $ cargo run --release --bin on2 8 0 --conf "! 011110111 a^1 <C 10 !"
             (Left, [.., Item::L(432)], _) => {
@@ -654,12 +683,14 @@ impl fmt::Display for SimStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Stats({}, {}, {}, {}, {})",
+            "Stats({:.2e}, {}, {}, {}, {}, {}, {:?})",
             self.num_counter_increments.blue(),
+            self.num_collisions.blue(),
             self.num_strides.blue(),
             self.num_uni_cycles.blue(),
             self.num_a_create.blue(),
-            self.num_c_create.blue()
+            self.num_c_create.blue(),
+            self.log2_collision_times_hist,
         )
     }
 }
