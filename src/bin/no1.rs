@@ -161,9 +161,8 @@ impl Configuration {
 
     // Count number of "strides" (applications of accelerate()) we could perform before a
     // collision (considering only the right half of the tape).
-    fn count_accel_strides(&self) -> Exp {
-        if !self
-            .rtape
+    fn count_accel_strides(rtape: &[Item]) -> Exp {
+        if !rtape
             .iter()
             .skip(1)
             .all(|item| matches!(item, Item::D | Item::X(_) | Item::C(3) | Item::E { block: 1, exp: _ }))
@@ -172,15 +171,13 @@ impl Configuration {
         }
 
         let mut min_exp = 1;
-        let max_reps: Option<Exp> = self
-            .rtape
-            .as_slice()
+        let max_reps: Option<Exp> = rtape
             .windows(3)
             .rev()
             .filter_map(|w| match w {
                 [Item::X(_), Item::C(3), Item::X(exp_from)] => {
+                    // Note: We don't want to take exp_from -> 0, so (exp_from - 1) / min_exp
                     let this_reps = (exp_from.saturating_sub(1)) / min_exp;
-                    // let this_reps = *exp_from / min_exp;
                     min_exp = min_exp.checked_shl(2).unwrap();
                     Some(this_reps)
                 }
@@ -217,12 +214,12 @@ impl Configuration {
 
     // Attempt to apply the @uni-cycle
     fn try_uni_cycle(&mut self) -> bool {
-        match (self.dir, self.ltape.as_slice(), self.rtape.as_slice()) {
+        match (self.dir, self.ltape.as_mut_slice(), self.rtape.as_mut_slice()) {
             // Example config:
             //   84719:  ! a^1 1 x^7640 D x^10345 3 x^7639 D x^10347 3 x^7635 D x^10355 1 x^7618 D x^10389 2 x^7550 D x^10524 0 x^7279 D x^11066 3 x^6197 D x^13231 1 x^1866 DD x^7713 0 x^95 2D x^598586766 1D >  x^300 D x^30826  b^8 D x^42804942 D x^3076 D x^1538 D x^300 D x^21397226 D x^13012670 D x^2139716 D x^1069858 D x^213964 D x^21621178 D x^3440996 D x^1720498 D x^344092 D x^1414318 D x^223068 D x^211854560 3 x^673806909 P
             #[rustfmt::skip]
             (Direction::Right,
-                [.., Item::E { block: 0, .. },
+                [.., Item::E { block: 0, exp: a_count },
                     Item::C(1), Item::X(7640), Item::D, Item::X(10345),
                     Item::C(3), Item::X(7639), Item::D, Item::X(10347),
                     Item::C(3), Item::X(7635), Item::D, Item::X(10355),
@@ -234,7 +231,7 @@ impl Configuration {
                     Item::C(0), Item::X(95),
                     Item::C(2), Item::D, Item::X(big_count),
                     Item::C(1), Item::D],
-                [.., Item::E { block: 1, .. },
+                [rtape_tail @ .., Item::E { block: 1, exp: b_count },
                     Item::X(30826), Item::D, Item::X(300)]) => {
                 // Each cycle reduces big_count by UNI_CYCLE_REDUCE and strides UNI_CYCLE_STRIDE times.
                 const UNI_CYCLE_REDUCE : Exp = 53946;
@@ -242,35 +239,16 @@ impl Configuration {
                 // max cycles before big_count is too small.
                 let max_cycles_left = *big_count / UNI_CYCLE_REDUCE;
                 // max_strides is max times we can stride before there is a crash on right side.
-                let max_strides = self.count_accel_strides();
+                let max_strides = Self::count_accel_strides(rtape_tail);
                 let max_cycles_right = max_strides / UNI_CYCLE_STRIDE;
                 // We cycle until one of the two above is imminent.
                 let num_cycles = cmp::min(max_cycles_left, max_cycles_right);
-                // println!("max_cycles_left: {:?}  /  max_cycles_right: {:?}  /  num_cycles: {:?}", max_cycles_left, max_cycles_right, num_cycles);
                 if num_cycles > 0 {
                     // Apply updates to left half of tape.
-                    // Note: we must do a second, mutable match to satisfy the borrowing logic.
-                    match (self.ltape.as_mut_slice(), self.rtape.as_mut_slice()) {
-                        ([.., Item::E { block: 0, exp: a_count },
-                            Item::C(1), Item::X(7640), Item::D, Item::X(10345),
-                            Item::C(3), Item::X(7639), Item::D, Item::X(10347),
-                            Item::C(3), Item::X(7635), Item::D, Item::X(10355),
-                            Item::C(1), Item::X(7618), Item::D, Item::X(10389),
-                            Item::C(2), Item::X(7550), Item::D, Item::X(10524),
-                            Item::C(0), Item::X(7279), Item::D, Item::X(11066),
-                            Item::C(3), Item::X(6197), Item::D, Item::X(13231),
-                            Item::C(1), Item::X(1866), Item::D, Item::D, Item::X(7713),
-                            Item::C(0), Item::X(95),
-                            Item::C(2), Item::D, Item::X(big_count),
-                            Item::C(1), Item::D],
-                        [.., Item::E { block: 1, exp: b_count },
-                            Item::X(30826), Item::D, Item::X(300)]) => {
-                            *big_count -= num_cycles.checked_mul(UNI_CYCLE_REDUCE).unwrap();
-                            *a_count = a_count.checked_add(num_cycles).unwrap();
-                            *b_count = b_count.checked_add(num_cycles).unwrap();
-                        }
-                        _ => unreachable!()
-                    }
+                    *big_count -= num_cycles.checked_mul(UNI_CYCLE_REDUCE).unwrap();
+                    *a_count = a_count.checked_add(num_cycles).unwrap();
+                    *b_count = b_count.checked_add(num_cycles).unwrap();
+
                     // Apply updates to right half of tape.
                     let to_exp_idxs : Vec<usize> = self.naive_accel_idxs().unwrap();
                     self.apply_multiple_strides(num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap(), to_exp_idxs);
