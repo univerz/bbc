@@ -215,7 +215,7 @@ impl Configuration {
         }
 
         let mut min_exp = 1;
-        let max_reps: Option<Exp> = rtape
+        rtape
             .windows(3)
             .rev()
             .filter_map(|w| match w {
@@ -228,13 +228,8 @@ impl Configuration {
                 [_, Item::C(3), _] => Some(0), // if there is a `3` then it should be in a valid position
                 _ => None,
             })
-            .min();
-        if let Some(reps) = max_reps {
-            return reps;
-        } else {
-            // TODO: Maybe this should actually be usize::MAX? Like if there are no Cs on the right, there's no limit, each stride does nothing to right. Correct?
-            return 0;
-        }
+            .min()
+            .unwrap_or(Exp::MAX)
     }
 
     // Apply multiple "strides" (applications of accelerate()) only to right hand side of tape.
@@ -296,8 +291,9 @@ impl Configuration {
                     *b_count = b_count.checked_add(num_cycles).unwrap();
 
                     // Apply updates to right half of tape.
-                    let to_exp_idxs : Vec<usize> = self.naive_accel_idxs().unwrap();
-                    self.apply_multiple_strides(num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap(), to_exp_idxs);
+                    if let Some(to_exp_idxs) = self.naive_accel_idxs() {
+                        self.apply_multiple_strides(num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap(), to_exp_idxs);
+                    }
                     return true;
                 }
                 return false;
@@ -421,6 +417,17 @@ impl Configuration {
                         self.stats.num_a_create += 1;
                     }
                 }
+                self.ltape.push(Item::C(0));
+                self.rtape.pop();
+            }
+            // `b^n > 3` -> `b^(n-1) D x^72142 D x^3076 D x^1538 D x^300 D x^30825 0 >`
+            (Right, [.., Item::E { block: 1, exp }], [.., Item::C(3)]) => {
+                *exp -= 1;
+                if *exp == 0 {
+                    self.ltape.pop();
+                }
+                use Item::*;
+                self.ltape.extend_from_slice(&[D, X(72142), D, X(3076), D, X(1538), D, X(300), D, X(30825)]); // 30826 -> 30825
                 self.ltape.push(Item::C(0));
                 self.rtape.pop();
             }
