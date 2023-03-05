@@ -52,6 +52,22 @@ type Tape = Vec<Item>;
 type RefBlocks<'a> = &'a [&'a [Item]];
 
 #[derive(Clone, Debug)]
+struct SimStats {
+    // Number of times an "increment" of counter config happens.
+    // Precisely this counts the number of times that `> R -> < R` occurs (including extrapolating
+    // number of times that transition would have occurred during counter acceleration (strides)).
+    num_counter_increments: Exp,
+    // Number of times accelerate() is applied (Counter acceleration).
+    num_strides: u64,
+    // Number of times try_uni_cycle() is applied (@uni-cycle accleration).
+    num_uni_cycles: u64,
+    // Number of times a new `a^1` block is created.
+    num_a_create: u64,
+    // Number of times a new `c^n` block is created (from `>P b^n -> c^n >P`).
+    num_c_create: u64,
+}
+
+#[derive(Clone, Debug)]
 struct Configuration {
     ltape: Tape,
     rtape: Tape,
@@ -59,9 +75,13 @@ struct Configuration {
     dir: Direction,
     sim_step: usize,
 
-    // Stats
-    num_uni_cycles: usize,
-    num_strides: usize,
+    stats: SimStats,
+}
+
+impl SimStats {
+    pub fn new() -> SimStats {
+        SimStats { num_counter_increments: 0, num_strides: 0, num_uni_cycles: 0, num_a_create: 0, num_c_create: 0 }
+    }
 }
 
 // >  xCC      ->  {2332}    >
@@ -86,8 +106,7 @@ impl Configuration {
             rtape: vec![Item::P],
             dir: Direction::Right,
             sim_step: 0,
-            num_uni_cycles: 0,
-            num_strides: 0,
+            stats: SimStats::new(),
         }
     }
 
@@ -136,10 +155,10 @@ impl Configuration {
         let to_exp_idxs = self.naive_accel_idxs();
 
         if let Some(idxs) = to_exp_idxs {
-            let mut move_exp_value = 1;
+            let mut move_exp_value: Exp = 1;
             for idx in idxs {
                 if let Some(Item::X(exp)) = self.rtape.get_mut(idx) {
-                    *exp = exp.checked_add(move_exp_value << 1).unwrap();
+                    *exp = exp.checked_add(move_exp_value.checked_shl(1).unwrap()).unwrap();
                 } else {
                     unreachable!()
                 }
@@ -148,11 +167,11 @@ impl Configuration {
                 } else {
                     unreachable!()
                 }
-                move_exp_value = move_exp_value << 2;
+                move_exp_value = move_exp_value.checked_shl(2).unwrap();
             }
             self.dir = Direction::Left;
-
-            self.num_strides += 1;
+            // There are 4 counter increments for every time the final C moves left.
+            self.stats.num_counter_increments = self.stats.num_counter_increments.checked_add(move_exp_value).unwrap();
             true
         } else {
             false
@@ -210,6 +229,8 @@ impl Configuration {
             }
             move_exp_value = move_exp_value.checked_shl(2).unwrap();
         }
+        // There are 4 counter increments for every time the final C moves left.
+        self.stats.num_counter_increments = self.stats.num_counter_increments.checked_add(move_exp_value).unwrap();
     }
 
     // Attempt to apply the @uni-cycle
@@ -252,7 +273,6 @@ impl Configuration {
                     // Apply updates to right half of tape.
                     let to_exp_idxs : Vec<usize> = self.naive_accel_idxs().unwrap();
                     self.apply_multiple_strides(num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap(), to_exp_idxs);
-                    self.num_uni_cycles += 1;
                     return true;
                 }
                 return false;
@@ -371,6 +391,7 @@ impl Configuration {
                         *exp = exp.checked_add(1).unwrap();
                     } else {
                         self.ltape.push(Item::E { block: 0, exp: 1 });
+                        self.stats.num_a_create += 1;
                     }
                 }
                 self.ltape.push(Item::C(0));
@@ -483,6 +504,7 @@ impl Configuration {
             // `> P end` -> `< P`
             (Right, _, [Item::P]) => {
                 self.dir = Left;
+                self.stats.num_counter_increments = self.stats.num_counter_increments.checked_add(1).unwrap();
             }
             // CHANGED `> PP` -> `x >` // from `> PP end`
             (Right, _, [.., Item::P, Item::P]) => {
@@ -544,6 +566,7 @@ impl Configuration {
                 self.ltape.push(Item::E { block: 2, exp: *move_exp });
                 pop_n(&mut self.rtape, 2);
                 self.rtape.push(Item::P);
+                self.stats.num_c_create += 1;
             }
 
             _ => return Err(Err::UnknownTransition),
@@ -554,10 +577,12 @@ impl Configuration {
     fn gen_step(&mut self, cfg: Config) -> Result<(), Err> {
         if cfg.accel_uni_cycles {
             if self.try_uni_cycle() {
+                self.stats.num_uni_cycles += 1;
                 return Ok(());
             }
         }
         if self.accelerate() {
+            self.stats.num_strides += 1;
             return Ok(());
         }
         self.step()
@@ -565,10 +590,20 @@ impl Configuration {
 
     fn run(&mut self, _machine: &Machine, _blocks: RefBlocks, cfg: Config) -> Result<(), Err> {
         while self.sim_step < cfg.sim_step_limit {
+            let old_a = self.stats.num_a_create;
+            let old_c = self.stats.num_c_create;
             self.gen_step(cfg)?;
             self.sim_step += 1;
-            if self.sim_step & ((1 << cfg.print_mod) - 1) == 0 {
-                println!("{self}");
+
+            // Print logic
+            if cfg.print_only_cycles {
+                if self.stats.num_a_create != old_a || self.stats.num_c_create != old_c {
+                    println!("{self}");
+                }
+            } else {
+                if self.sim_step & ((1 << cfg.print_mod) - 1) == 0 {
+                    println!("{self}");
+                }
             }
         }
         return Err(Err::StepLimit);
@@ -602,16 +637,30 @@ impl fmt::Display for Item {
 impl fmt::Display for Configuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ", self.sim_step.bright_white())?;
-        write!(f, "({}, {}):  ", self.num_strides.blue(), self.num_uni_cycles.blue())?;
         if DSP_ROTATE_TAPE {
             self.rtape.iter().try_for_each(|item| write!(f, "{item}"))?;
             write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
-            self.ltape.iter().rev().try_for_each(|item| write!(f, "{item}"))
+            self.ltape.iter().rev().try_for_each(|item| write!(f, "{item}"))?;
         } else {
             self.ltape.iter().try_for_each(|item| write!(f, "{item}"))?;
             write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
-            self.rtape.iter().rev().try_for_each(|item| write!(f, "{item}"))
+            self.rtape.iter().rev().try_for_each(|item| write!(f, "{item}"))?;
         }
+        write!(f, "   {}", self.stats)
+    }
+}
+
+impl fmt::Display for SimStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Stats({}, {}, {}, {}, {})",
+            self.num_counter_increments.blue(),
+            self.num_strides.blue(),
+            self.num_uni_cycles.blue(),
+            self.num_a_create.blue(),
+            self.num_c_create.blue()
+        )
     }
 }
 
@@ -621,8 +670,7 @@ fn raw_parse(s: &str) -> Result<(Configuration, Direction)> {
         rtape: Tape::new(),
         dir: Direction::Right,
         sim_step: 0,
-        num_strides: 0,
-        num_uni_cycles: 0,
+        stats: SimStats::new(),
     };
     let mut active_tape_dir = Direction::Left;
     let mut tape = &mut conf.ltape;
@@ -707,10 +755,12 @@ struct Args {
     #[argh(switch, short = 't')]
     tui: bool,
 
-    #[argh(switch, short = 'x', description = "interpret step limit and print limit as 2^n?")]
-    exponential_steps: bool,
+    #[argh(switch, short = 'x', description = "interpret step limit directly (not as 2^n)?")]
+    non_exponential_steps: bool,
     #[argh(switch, short = 'c', description = "accelerate @uni-cycles")]
     accel_uni_cycles: bool,
+    #[argh(switch, short = 'a', description = "only print when a new a^1 block or c-block is produced.")]
+    print_only_cycles: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -718,6 +768,7 @@ struct Config {
     sim_step_limit: usize,
     print_mod: u8,
     accel_uni_cycles: bool,
+    print_only_cycles: bool,
 }
 
 // new run:               cargo run --release --bin no1 60 30
@@ -726,17 +777,19 @@ struct Config {
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    // return transcode();
-
     let machine = Machine::from("1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC");
     let args: Args = argh::from_env();
-    let sim_step_limit = if args.exponential_steps {
-        2usize.checked_pow(args.sim_step_limit).unwrap()
-    } else {
+    let sim_step_limit = if args.non_exponential_steps {
         args.sim_step_limit.try_into().unwrap()
+    } else {
+        2usize.checked_pow(args.sim_step_limit).unwrap()
     };
-    let cfg =
-        Config { sim_step_limit: sim_step_limit, print_mod: args.print_mod, accel_uni_cycles: args.accel_uni_cycles };
+    let cfg = Config {
+        sim_step_limit: sim_step_limit,
+        print_mod: args.print_mod,
+        accel_uni_cycles: args.accel_uni_cycles,
+        print_only_cycles: args.print_only_cycles,
+    };
     let mut conf = args.conf;
     // dbg!(cfg);
     println!("{}", conf);
