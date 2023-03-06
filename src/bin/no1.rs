@@ -2,8 +2,9 @@
 #![feature(option_result_contains)]
 
 use argh::FromArgs;
-use bbc::machine::{Direction, Machine};
+use bbc::machine::Direction;
 use color_eyre::eyre::Result;
+use derivative::Derivative;
 use itertools::Itertools;
 use owo_colors::OwoColorize;
 use std::cmp;
@@ -26,7 +27,7 @@ pub enum Err {
 type Exp = u128;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Item {
+pub enum Item {
     /// left: `011 01`, right: `110 10`
     D,
     /// 011
@@ -49,7 +50,14 @@ enum Item {
 
 type Tape = Vec<Item>;
 
-type RefBlocks<'a> = &'a [&'a [Item]];
+mod block {
+    use super::Item::{self, *};
+    pub const LEFT_A: [Item; 4] = [C(2), X(7640), D, X(10344)];
+    pub const LEFT_B: [Item; 10] = [D, X(72142), D, X(3076), D, X(1538), D, X(300), D, X(30826)];
+    pub const RIGHT_B: [Item; 10] = [X(30826), D, X(300), D, X(1538), D, X(3076), D, X(72142), D];
+    pub const LEFT_C: [Item; 15] =
+        [C(1), D, X(72141), C(1), D, X(3075), C(1), D, X(1537), C(1), D, X(299), C(1), D, X(30825)];
+}
 
 #[derive(Clone, Debug, Default)]
 struct SimStats {
@@ -76,6 +84,8 @@ struct SimStats {
     log2_collision_times_hist: [Exp; 20],
 }
 
+#[derive(Derivative)]
+#[derivative(PartialEq)]
 #[derive(Clone, Debug)]
 struct Configuration {
     ltape: Tape,
@@ -84,6 +94,7 @@ struct Configuration {
     dir: Direction,
     sim_step: usize,
 
+    #[derivative(PartialEq = "ignore")]
     stats: SimStats,
 }
 
@@ -338,8 +349,9 @@ impl Configuration {
         }
 
         use Direction::*;
+        // transitions-test-begin
         match (self.dir, self.ltape.as_mut_slice(), self.rtape.as_mut_slice()) {
-            // NEW `end < 3x` -> `1 > DP` // $ cargo run --release --bin on2 4 0 --conf "! 00 <C 10 1010 110 110 !" ... 15:   ! a^1 001 A> a^1 10110 !
+            // `end < 3x` -> `1 > DP`
             (Left, [], [.., Item::X(exp), Item::C(3)]) => {
                 pop_x_truncate!(rtape, exp, 1);
                 self.rtape.push(Item::P);
@@ -348,7 +360,7 @@ impl Configuration {
                 self.dir = Right;
                 // TODO: update self.stats.num_tm_steps
             }
-            // NEW `x > end` -> ` < 3xP` // $  cargo run --release --bin on2 8 0 --conf "! 011011 A> 00000000 !"
+            // `x > end` -> `< 3xP`
             (Right, [.., Item::X(exp)], []) => {
                 pop_x_truncate!(ltape, exp);
                 self.rtape.push(Item::P);
@@ -357,7 +369,7 @@ impl Configuration {
                 self.dir = Left;
                 self.stats.num_tm_steps += 79;  // x A> $ -(79)-> <C10 C3 x R
             }
-            // NEW `D > end` -> `< x` // $ cargo run --release --bin on2 4 0 --conf "! 011 01 A> 000 !" ... 6:   <C 10 a^2 !
+            // `D > end` -> `< x`
             (Right, [.., Item::D], []) => {
                 self.ltape.pop();
                 self.rtape.push(Item::X(1)); // || test Item::P + Item::P
@@ -365,7 +377,7 @@ impl Configuration {
                 // TODO: update self.stats.num_tm_steps
             }
 
-            // `> D33` -> `P0 >` // $ cargo run --release --bin on2 8 0 --conf "! A> 11010 1010 1010 !"
+            // `> D33` -> `P0 >`
             (Right, _, [.., Item::C(3), Item::C(3), Item::D]) => {
                 pop_n(&mut self.rtape, 3);
                 self.ltape.push(Item::P);
@@ -382,53 +394,54 @@ impl Configuration {
                 self.stats.num_tm_steps += 11;  // > D3 -(7)-> D > 3 -(4)-> 011 01 1011 A>
             }
 
-            // `x < ` -> `< x` // x now needs merge in this direction because of acceleration
+            // `x^n <` -> `< x^n`
             (Left, [.., Item::X(exp)], _) => {
                 let exp_const = *exp;
                 push_or_merge_x(&mut self.rtape, *exp);
                 self.ltape.pop();
                 self.stats.num_tm_steps += 6 * exp_const;  // 011 <C10 -(3)-> <C10 110
             }
-            // `(D | P | 3) < ` -> `< (D | P | 3)`
+            // `D <` -> `< D`
             (Left, [.., Item::D], _) => {
                 let item = self.ltape.pop().unwrap();
                 self.rtape.push(item);
 
-                use Item::*;
-                // if self.ltape.ends_with(&[D, X(72142), D, X(3076), D, X(1538), D, X(300), D, X(30826)]) {
-                if self.rtape.ends_with(&[X(30826), D, X(300), D, X(1538), D, X(3076), D, X(72142), D]) {
-                    pop_n(&mut self.rtape, 10);
+                if self.rtape.ends_with(&block::RIGHT_B) {
+                    pop_n(&mut self.rtape, block::RIGHT_B.len());
                     if let Some(Item::E { block: 1, exp }) = self.rtape.last_mut() {
                         *exp = exp.checked_add(1).unwrap();
                     } else {
                         self.rtape.push(Item::E { block: 1, exp: 1 })
                     }
-                    // return Err(Err::Interesting);
                 }
                 self.stats.num_tm_steps += 9;  // 011 01 <C10 -(6)-> 011 <C10 10 -(3)-> <C10 110 10
             }
+            // `P <` -> `< P`
             (Left, [.., Item::P], _) => {
                 let item = self.ltape.pop().unwrap();
                 self.rtape.push(item);
                 self.stats.num_tm_steps += 3;  // 011 <C10 -(3)-> <C10 110
             }
+            // `3 <` -> `< 3`
             (Left, [.., Item::C(3)], _) => {
                 let item = self.ltape.pop().unwrap();
                 self.rtape.push(item);
                 self.stats.num_tm_steps += 12;  // 01 <C10 -(6)-> <C10 10
             }
-            // `0 <` -> `1x >` | `1 < ` -> `2 >` | `2 <` -> `3x >`
+            // `0 <` -> `1x >`
             (Left, [.., Item::C(c @ 0)], _) => {
                 *c += 1;
                 self.ltape.push(Item::X(1));
                 self.dir = Right;
                 self.stats.num_tm_steps += 17;  // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
             }
+            // `1 <` -> `2 >`
             (Left, [.., Item::C(c @ 1)], _) => {
                 *c += 1;
                 self.dir = Right;
                 self.stats.num_tm_steps += 11;  // 001 <C10 -(11)-> 11011 A>
             }
+            // `2 <` -> `3x >`
             (Left, [.., Item::C(c @ 2)], _) => {
                 *c += 1;
                 self.ltape.push(Item::X(1));
@@ -436,12 +449,12 @@ impl Configuration {
                 self.stats.num_tm_steps += 17;  // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
             }
 
-            // CHANGED `x > 3` -> `0 >` // from `> x^n 3` -> `x^(n-1) 0 >`
+            // `x > 3` -> `0 >` // changed from `> x^n 3` -> `x^(n-1) 0 >`
             (Right, [.., Item::X(exp)], [.., Item::C(3)]) => {
                 let test_a = *exp == 10345; // --conf "2 x^7640 D x^10344 2 x^7640 D x^10344 1 x^7640 D x^10345 3 x^7639 D x^10347 3 < ! "
                 pop_x_truncate!(ltape, exp);
-                if test_a && self.ltape.ends_with(&[Item::C(2), Item::X(7640), Item::D, Item::X(10344)]) {
-                    pop_n(&mut self.ltape, 4);
+                if test_a && self.ltape.ends_with(&block::LEFT_A) {
+                    pop_n(&mut self.ltape, block::LEFT_A.len());
                     if let Some(Item::E { block: 0, exp }) = self.ltape.last_mut() {
                         *exp = exp.checked_add(1).unwrap();
                     } else {
@@ -454,7 +467,7 @@ impl Configuration {
                 self.stats.num_tm_steps += 4;  // A> 1010 -(4)-> 1011 A>
             }
 
-            // `0 > 3` (== `> x33`) -> `L(2332) >` // $ cargo run --release --bin on2 8 0 --conf "! 011 0111 011 A> 1010 !"
+            // `0 > 3` (== `> x33`) -> `L(2332) >`
             (Right, [.., Item::C(0)], [.., Item::C(3)]) => {
                 self.ltape.pop();
                 self.ltape.push(Item::L(2332));
@@ -462,7 +475,7 @@ impl Configuration {
                 self.stats.record_collision();
                 // TODO: update self.stats.num_tm_steps
             }
-            // `L(2332) <` -> `L(2301) x >` // $ cargo run --release --bin on2 8 0 --conf "! 01101110111 a^1 <C 10 !"
+            // `L(2332) <` -> `L(2301) x >`
             (Left, [.., Item::L(2332)], _) => {
                 self.ltape.pop();
                 self.ltape.push(Item::L(2301));
@@ -470,14 +483,14 @@ impl Configuration {
                 self.dir = Right;
                 // TODO: update self.stats.num_tm_steps
             }
-            // `L(2301) <` -> `L(252) >` // $ cargo run --release --bin on2 8 0 --conf "! 0110111001 <C 10 !"
+            // `L(2301) <` -> `L(252) >`
             (Left, [.., Item::L(2301)], _) => {
                 self.ltape.pop();
                 self.ltape.push(Item::L(252));
                 self.dir = Right;
                 // TODO: update self.stats.num_tm_steps
             }
-            // `L(252) <` -> `PDx >` // $ cargo run --release --bin on2 8 0 --conf "! 011011111 a^1  <C 10 !"
+            // `L(252) <` -> `PDx >`
             (Left, [.., Item::L(252)], _) => {
                 self.ltape.pop();
                 self.ltape.push(Item::P);
@@ -486,7 +499,7 @@ impl Configuration {
                 self.dir = Right;
                 // TODO: update self.stats.num_tm_steps
             }
-            // `> PD3x` -> `L(2301) D > P` // $ cargo run --release --bin on2 5 0 --conf "! A> 110 11010 1010 110110 !" ... 31:   !  a^2 1001 a^1 01 A> 110 !
+            // `> PD3x` -> `L(2301) D > P`
             (Right, _, [.., Item::X(exp), Item::C(3), Item::D, Item::P]) => {
                 pop_x_truncate!(rtape, exp, 3);
                 self.rtape.push(Item::P);
@@ -494,7 +507,7 @@ impl Configuration {
                 self.ltape.push(Item::D);
                 // TODO: update self.stats.num_tm_steps
             }
-            // `> PDDx` -> `21D > ` // $ cargo run --release --bin on2 8 0 --conf "! A> 110 11010 11010 110110 !" ... 63:   !  a^1 11 a^2 001 a^1 01 A>  !
+            // `> PDDx` -> `21D >`
             (Right, _, [.., Item::X(exp), Item::D, Item::D, Item::P]) => {
                 pop_x_truncate!(rtape, exp, 3);
                 self.ltape.push(Item::C(2));
@@ -502,7 +515,7 @@ impl Configuration {
                 self.ltape.push(Item::D);
                 // TODO: update self.stats.num_tm_steps
             }
-            // `2 > 3` (== `13 <`) -> `L(432) >` // $ cargo run --release --bin on2 8 0 --conf "! 011 0111 011 A> 1010 !"
+            // `2 > 3` (== `13 <`) -> `L(432) >`
             (Right, [.., Item::C(2)], [.., Item::C(3)]) => {
                 self.ltape.pop();
                 self.ltape.push(Item::L(432));
@@ -510,7 +523,7 @@ impl Configuration {
                 self.stats.record_collision();
                 self.stats.num_tm_steps += 4;  // A> 1010 -(4)-> 1011 A>
             }
-            // `L(432) <` -> `L(401) x >` // $ cargo run --release --bin on2 8 0 --conf "! 011110111 a^1 <C 10 !"
+            // `L(432) <` -> `L(401) x >`
             (Left, [.., Item::L(432)], _) => {
                 self.ltape.pop();
                 self.ltape.push(Item::L(401));
@@ -518,14 +531,14 @@ impl Configuration {
                 self.dir = Right;
                 self.stats.num_tm_steps += 17;  // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
             }
-            // `L(401) <` -> `L(62) >` // $ cargo run --release --bin on2 8 0 --conf "! 01111001 <C 10 !"
+            // `L(401) <` -> `L(62) >`
             (Left, [.., Item::L(401)], _) => {
                 self.ltape.pop();
                 self.ltape.push(Item::L(62));
                 self.dir = Right;
                 self.stats.num_tm_steps += 11;  // 001 <C10 -(11)-> 11011 A>
             }
-            // `L(62) <` -> `L(31) x >` // $ cargo run --release --bin on2 8 0 --conf "! 0111111 a^1 <C 10 !"
+            // `L(62) <` -> `L(31) x >`
             (Left, [.., Item::L(62)], _) => {
                 self.ltape.pop();
                 self.ltape.push(Item::L(31));
@@ -533,7 +546,7 @@ impl Configuration {
                 self.dir = Right;
                 self.stats.num_tm_steps += 17;  // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
             }
-            // `x L(31) <` -> `P1D >` // $ cargo run --release --bin on2 8 0 --conf "! 011011 011101 <C 10 !"
+            // `x L(31) <` -> `P1D >`
             (Left, [.., Item::X(exp), Item::L(31)], _) => {
                 pop_x_truncate!(ltape, exp, 1);
                 self.ltape.push(Item::P);
@@ -581,7 +594,7 @@ impl Configuration {
                 self.stats.num_counter_increments = self.stats.num_counter_increments.checked_add(1).unwrap();
                 self.stats.num_tm_steps += 9;  // A> 110 $ -(6)-> 011 <C10 $ -(3)-> <C10 110 $
             }
-            // CHANGED `> PP` -> `x >` // from `> PP end`
+            // `> PP` -> `x >` // changed from `> PP end`
             (Right, _, [.., Item::P, Item::P]) => {
                 pop_n(&mut self.rtape, 2);
                 push_or_merge_x(&mut self.ltape, 1);
@@ -593,26 +606,14 @@ impl Configuration {
                 self.ltape.push(Item::D);
                 self.stats.num_tm_steps += 7;  // A> 11010 -(5)-> 011 B> 10 -(2)-> 01101 A>
             }
-            // `> x` -> `x >`
+            // `> x^n` -> `x^n >`
             (Right, _, [.., Item::X(exp)]) => {
                 let exp_const = *exp;
-                // compression here no longer works with acceleration
-                // let test_b = *exp == 30826; // --conf "2 > D x^598979953 PDP x^72142 D x^3076 D x^1538 D x^300 D x^30826 D x^42804942 D x^213427271 3 x^670661487 P"
                 push_or_merge_x(&mut self.ltape, *exp);
-                // use Item::*;
-                // if test_b && self.ltape.ends_with(&[D, X(72142), D, X(3076), D, X(1538), D, X(300), D, X(30826)]) {
-                //     pop_n(&mut self.ltape, 10);
-                //     if let Some(Item::E { block: 1, exp }) = self.ltape.last_mut() {
-                //         *exp = exp.checked_add(1).unwrap();
-                //     } else {
-                //         self.ltape.push(Item::E { block: 1, exp: 1 })
-                //     }
-                //     // return Err(Err::Interesting);
-                // }
                 self.rtape.pop();
                 self.stats.num_tm_steps += 10 * exp_const;  // A> 110110 -(10)-> 011011 A>
             }
-            // `> b` -> `b >`
+            // `> b^n` -> `b^n >`
             (Right, _, [.., Item::E { block: 1, exp: move_exp }]) => {
                 if let Some(Item::E { block: 1, exp }) = self.ltape.last_mut() {
                     *exp = exp.checked_add(*move_exp).unwrap();
@@ -622,40 +623,35 @@ impl Configuration {
                 self.rtape.pop();
                 // TODO: update self.stats.num_tm_steps
             }
-            // `b < ` -> `< b`
+            // `b^n <` -> `< b^n`
             (Left, [.., Item::E { block: 1, exp: move_exp }], _) => {
                 self.rtape.push(Item::E { block: 1, exp: *move_exp });
                 self.ltape.pop();
                 // TODO: update self.stats.num_tm_steps
             }
-            // `c^n < ` -> `c^(n-1) expanded-c <`
+            // `c^n <` -> `c^(n-1) expanded-c <`
             (Left, [.., Item::E { block: 2, exp }], _) => {
                 *exp -= 1;
                 if *exp == 0 {
                     self.ltape.pop();
                 }
-                use Item::*;
-                let e = [C(1), D, X(72141), C(1), D, X(3075), C(1), D, X(1537), C(1), D, X(299), C(1), D, X(30825)];
-                self.ltape.extend_from_slice(&e); // NUDO: use extend() if Items gets bigger / allocates
+                self.ltape.extend_from_slice(&block::LEFT_C);
                 // TODO: update self.stats.num_tm_steps
             }
-            // `b^n > 3` = `b^(n-1) expanded-b > 3`
+            // `b^n > 3` -> `b^(n-1) expanded-b > 3`
             (Right, [.., Item::E { block: 1, exp }], [.., Item::C(3)]) => {
                 *exp -= 1;
                 if *exp == 0 {
                     self.ltape.pop();
                 }
-                use Item::*;
-                let e = [D, X(72142), D, X(3076), D, X(1538), D, X(300), D, X(30826)];
-                self.ltape.extend_from_slice(&e); // NUDO: use extend() if Items gets bigger / allocates
+                self.ltape.extend_from_slice(&block::LEFT_B);
                 // 0 TM steps
             }
             (Left, [.., Item::Unreachable], _) | (Right, _, [.., Item::Unreachable]) => {
                 return Err(Err::Unreachable);
             }
-            // `> P b` -> c > P // --conf "! > P   D x^72142 D x^3076 D x^1538 D x^300 D x^30826   D !"
+            // `> P b^n` -> `c^n > P`
             (Right, _, [.., Item::E { block: 1, exp: move_exp }, Item::P]) => {
-                // -> "! 1D x^72141 1D x^3075 1D x^1537 1D x^299 1D x^30825  > P !"
                 self.ltape.push(Item::E { block: 2, exp: *move_exp });
                 pop_n(&mut self.rtape, 2);
                 self.rtape.push(Item::P);
@@ -665,6 +661,7 @@ impl Configuration {
 
             _ => return Err(Err::UnknownTransition),
         }
+        // transitions-test-end
         Ok(())
     }
 
@@ -684,7 +681,7 @@ impl Configuration {
         self.step()
     }
 
-    fn run(&mut self, _machine: &Machine, _blocks: RefBlocks, cfg: Config) -> Result<(), Err> {
+    fn run(&mut self, cfg: Config) -> Result<(), Err> {
         while self.sim_step < cfg.sim_step_limit {
             let old_a = self.stats.num_a_create;
             let old_c = self.stats.num_c_create;
@@ -736,7 +733,7 @@ impl fmt::Display for Item {
 
 impl fmt::Display for Configuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ", self.sim_step.bright_white())?;
+        write!(f, "{}: ", self.sim_step.bright_white())?;
         if DSP_ROTATE_TAPE {
             self.rtape.iter().try_for_each(|item| write!(f, "{item}"))?;
             write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
@@ -882,7 +879,6 @@ struct Config {
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let machine = Machine::from("1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC");
     let args: Args = argh::from_env();
     let sim_step_limit = if args.non_exponential_steps {
         args.sim_step_limit.try_into().unwrap()
@@ -890,7 +886,7 @@ fn main() -> Result<()> {
         2usize.checked_pow(args.sim_step_limit).unwrap()
     };
     let cfg = Config {
-        sim_step_limit: sim_step_limit,
+        sim_step_limit,
         print_mod: args.print_mod,
         accel_counters: !args.no_accel_counters,
         accel_uni_cycles: !args.no_accel_uni_cycles,
@@ -900,12 +896,10 @@ fn main() -> Result<()> {
     // dbg!(cfg);
     println!("{}", conf);
 
-    let blocks = Vec::new();
-
     if args.tui {
-        tui(conf, &machine, &blocks, cfg)?;
+        tui(conf, cfg)?;
     } else {
-        let ret = conf.run(&machine, &blocks, cfg);
+        let ret = conf.run(cfg);
         println!("{conf}");
         dbg!(&ret);
     }
@@ -913,7 +907,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: Config) -> Result<()> {
+fn tui(mut conf: Configuration, mut cfg: Config) -> Result<()> {
     let stdin = io::stdin();
     let mut screen = io::stdout().into_raw_mode()?.into_alternate_screen()?;
     write!(screen, "{}", termion::cursor::Hide).unwrap();
@@ -944,7 +938,7 @@ fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: C
                 history.push_front((speed, state, conf.clone()));
                 let step = 1 << speed;
                 cfg.sim_step_limit = conf.sim_step + step;
-                state = conf.run(machine, blocks, cfg);
+                state = conf.run(cfg);
                 if history.len() > 1_000_000 {
                     history.pop_back();
                 }
@@ -1006,25 +1000,295 @@ fn transcode() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use bbc::machine::{Head, Machine};
+    use color_eyre::eyre::{Context, ContextCompat};
+    use itertools::repeat_n;
+    use std::fmt::Write;
+
     use super::*;
 
-    // #[test]
-    // fn parse_block() -> Result<()> {
-    //     let mut b = parse("! x23 x^7640 DP x^10344 L(69)")?;
-    //     b.reverse();
-    //     assert_eq!(b, parse("L(69) x^10344 PD  x^7640 32x!")?);
-    //     Ok(())
-    // }
+    // TODO: test compressions
+    // TODO: test final configuration
+
+    // cargo test transitions -- --nocapture
+    #[test]
+    fn transitions() {
+        let lines: Vec<&str> = include_str!("no1.rs")
+            .lines()
+            .skip_while(|l| !l.contains("transitions-test-begin"))
+            .take_while(|l| !l.contains("transitions-test-end"))
+            .map(|l| l.trim())
+            .collect();
+
+        let impls: Vec<&&str> = lines
+            .iter()
+            .filter(|l| (l.starts_with("(Left, ") || l.starts_with("(Right, ")) && !l.contains("Unreachable"))
+            .collect();
+        assert!(!impls.is_empty(), "no transition implementations found");
+
+        let rules: Vec<(_, _)> = lines
+            .iter()
+            .filter_map(|l| {
+                fn parse(l: &str, r: &str, msg: &'static str) -> String {
+                    r.split('`').skip(1).next().with_context(|| format!("{l:?}")).expect(msg).to_owned()
+                }
+                l.splitn(2, " -> ")
+                    .collect_tuple()
+                    .map(|(from, to)| (parse(l, from, "invalid from rule"), parse(l, to, "invalid to rule")))
+            })
+            .collect();
+        assert_eq!(
+            impls.len(),
+            rules.len(),
+            "implementations & rule descriptions do not match {:#?}",
+            rules.iter().zip_longest(impls.iter()).map(|i| format!("{i:?}")).collect::<Vec<_>>()
+        );
+
+        for (from, to) in rules {
+            println!("\n* {from:?} -> {to:?}");
+            let (from, to) = from
+                .strip_prefix("end")
+                .map(|from| (from.to_string(), to.to_string()))
+                .unwrap_or_else(|| (format!("! {from}"), format!("! {to}")));
+            let (from, to) = from
+                .strip_suffix("end")
+                .map(|from| (from.to_string(), to.to_string()))
+                .unwrap_or_else(|| (format!("{from} !"), format!("{to} !")));
+
+            if from.contains("^n") {
+                if to.contains("expanded-") {
+                    let (block, to) = if to.contains("expanded-b") {
+                        ("b", to.replace("expanded-b", &block2str(&block::LEFT_B)))
+                    } else {
+                        assert!(to.contains("expanded-c"));
+                        ("c", to.replace("expanded-c", &block2str(&block::LEFT_C)))
+                    };
+                    for (exp_n, exp_n1) in [("^1", ""), ("^2", &format!("{block}^1"))] {
+                        test_fixed_n(from.replace("^n", exp_n), to.replace(&format!("{block}^(n-1)"), exp_n1), false);
+                    }
+                } else {
+                    let is_xn_transfer = from.contains("x^n");
+                    test_fixed_n(from.replace("^n", "^1"), to.replace("^n", "^1"), is_xn_transfer);
+                    test_fixed_n(from.replace("^n", "^2"), to.replace("^n", "^2"), is_xn_transfer);
+                }
+            } else {
+                test_fixed_n(from, to, false);
+            }
+        }
+    }
+
+    fn test_fixed_n(from: String, to: String, skip_pop_x: bool) {
+        let from: Configuration = from.parse().with_context(|| from).unwrap();
+        let mut to: Configuration = to.parse().with_context(|| to).unwrap();
+
+        to.sim_step = 1;
+
+        test_conf(&from, &to);
+
+        // merge x
+        for dir in [Direction::Left, Direction::Right] {
+            let (mut from_clone, mut to_clone) = (from.clone(), to.clone());
+            let from_tape = if dir == Direction::Left { &mut from_clone.ltape } else { &mut from_clone.rtape };
+            let to_tape = if dir == Direction::Left { &mut to_clone.ltape } else { &mut to_clone.rtape };
+            match to_tape.as_mut_slice() {
+                [Item::Unreachable, Item::X(exp @ 1), ..] => {
+                    *exp = 11;
+                    from_tape.insert(1, Item::X(10));
+                    test_conf(&from_clone, &to_clone);
+                }
+                _ => (),
+            }
+        }
+
+        if skip_pop_x {
+            return;
+        }
+
+        // pop x
+        for dir in [Direction::Left, Direction::Right] {
+            let (mut from_clone, mut to_clone) = (from.clone(), to.clone());
+            let from_tape = if dir == Direction::Left { &mut from_clone.ltape } else { &mut from_clone.rtape };
+            let to_tape = if dir == Direction::Left { &mut to_clone.ltape } else { &mut to_clone.rtape };
+            match from_tape.as_mut_slice() {
+                [Item::Unreachable, Item::X(exp @ 1), ..] => {
+                    *exp = 11;
+                    to_tape.insert(1, Item::X(10));
+                    test_conf(&from_clone, &to_clone);
+                }
+                _ => (),
+            }
+        }
+    }
+
+    fn test_conf(from: &Configuration, to: &Configuration) {
+        println!("\t`{}` -> `{}`", strip_stats_and_steps(from.to_string()), strip_stats_and_steps(to.to_string()));
+
+        let cfg = Config {
+            sim_step_limit: 1,
+            print_mod: 63,
+            accel_counters: true,
+            accel_uni_cycles: true,
+            print_only_cycles: false,
+        };
+        let mut conf = from.clone();
+        assert_eq!(conf.run(cfg), Err(Err::StepLimit), "conf run failed");
+        assert_eq!(
+            conf,
+            *to,
+            "conf {} -!-> {}",
+            strip_stats_and_steps(from.to_string()),
+            strip_stats_and_steps(to.to_string())
+        );
+        println!("\t\tsim conf ok");
+
+        let mut start: RawConf = from.into();
+        let end: RawConf = to.into();
+        let debug = if start.tape.iter().map(|t| t.len()).sum::<usize>() < 100 { true } else { false };
+
+        let valid = start.run(end, 10_000_000, debug);
+        assert!(
+            valid,
+            "raw conf {} -!-> {}",
+            strip_stats_and_steps(from.to_string()),
+            strip_stats_and_steps(to.to_string())
+        );
+        // TODO: remove if guard @shawn
+        if conf.stats.num_tm_steps != 0 {
+            assert_eq!(conf.stats.num_tm_steps, start.steps);
+        }
+        println!("\t\traw conf ok");
+    }
+
+    type RawTape = Vec<u8>;
+
+    struct RawConf {
+        tape: [RawTape; 2],
+        head: Head,
+        steps: Exp,
+    }
+
+    impl RawConf {
+        fn run(&mut self, end: RawConf, steps_limit: Exp, debug: bool) -> bool {
+            let machine = Machine::from("1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC");
+            if debug {
+                println!("\t   ->   {end}");
+            }
+            loop {
+                if debug {
+                    println!("\t\t{self}");
+                }
+                if self.head == end.head {
+                    // TODO: use expected steps as stop signal?
+                    let tapes_match = self.tape.iter().zip(end.tape.iter()).all(|(s, e)| {
+                        e.strip_suffix(s.as_slice()).map(|zeros| zeros.iter().all(|i| *i == 0)).unwrap_or(false)
+                    });
+                    if tapes_match {
+                        return true;
+                    }
+                }
+                if self.steps == steps_limit {
+                    return false;
+                }
+
+                let symbol = self.tape[self.head.direction.idx()].pop().unwrap_or(0);
+                assert_ne!(symbol, u8::MAX, "reached unreachable symbol `!`");
+                let trans = machine.get_transition(symbol, self.head.state).unwrap();
+                self.head = trans.head;
+                self.tape[self.head.direction.opp_idx()].push(trans.symbol);
+
+                self.steps = self.steps.checked_add(1).unwrap();
+            }
+        }
+    }
+
+    impl From<&Configuration> for RawConf {
+        fn from(value: &Configuration) -> Self {
+            use Direction::*;
+
+            fn extend_from_item(raw_tape: &mut RawTape, item: &Item, side: Direction) {
+                let mut extend =
+                    |bytes: &[u8]| raw_tape.extend(bytes.into_iter().filter_map(|b| (*b != b' ').then(|| *b - b'0')));
+                match *item {
+                    Item::D if side == Left => extend(b"01101"),
+                    Item::D if side == Right => extend(b"01011"),
+                    Item::P => extend(b"011"),
+                    Item::C(0) if side == Left => extend(b"011 0111 011"),
+                    Item::C(1) if side == Left => extend(b"011 0 01"),
+                    Item::C(2) if side == Left => extend(b"01111 011"),
+                    Item::C(3) => extend(b"01 01"),
+                    Item::X(exp) => (0..exp.try_into().unwrap()).for_each(|_| extend(b"011 011")),
+                    Item::L(run) if side == Left => run.to_string().bytes().for_each(|c| {
+                        raw_tape.push(0);
+                        raw_tape.extend(repeat_n(1, (c - b'0') as usize))
+                    }),
+                    Item::E { block, exp } => {
+                        let tape: &[Item] = match block {
+                            0 => &block::LEFT_A,
+                            1 if side == Left => &block::LEFT_B,
+                            1 if side == Right => &block::RIGHT_B,
+                            2 => &block::LEFT_C,
+                            _ => unimplemented!(),
+                        };
+                        (0..exp.try_into().unwrap()).for_each(|_| extend_from_tape(raw_tape, tape, side))
+                    }
+                    Item::Unreachable => raw_tape.push(u8::MAX),
+                    _ => unimplemented!(),
+                }
+            }
+
+            fn extend_from_tape(raw_tape: &mut RawTape, tape: &[Item], side: Direction) {
+                tape.iter().for_each(|item| extend_from_item(raw_tape, item, side))
+            }
+            let mut ltape = Vec::new();
+            extend_from_tape(&mut ltape, &value.ltape, Left);
+            let mut rtape = Vec::new();
+            extend_from_tape(&mut rtape, &value.rtape, Right);
+
+            let head = match value.dir {
+                Left => {
+                    rtape.extend([0, 1]);
+                    Head { state: 2, direction: value.dir } // <C 10 
+                }
+                Right => {
+                    Head { state: 0, direction: value.dir } // A> 
+                }
+            };
+
+            RawConf { tape: [ltape, rtape], head, steps: 0 }
+        }
+    }
+
+    impl fmt::Display for RawConf {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fn write_symbol(f: &mut fmt::Formatter<'_>, i: &u8) -> fmt::Result {
+                f.write_char(if *i == u8::MAX { '!' } else { (i + b'0') as char })
+            }
+
+            write!(f, "{}: ", self.steps)?;
+            self.tape[0].iter().try_for_each(|i| write_symbol(f, i))?;
+            write!(f, " {} ", self.head)?;
+            self.tape[1].iter().rev().try_for_each(|i| write_symbol(f, i))
+        }
+    }
+
+    fn block2str(block: &[Item]) -> String {
+        String::from_utf8(strip_ansi_escapes::strip(block.iter().join("")).unwrap()).unwrap()
+    }
 
     #[test]
     fn parse_conf() -> Result<()> {
         for inp in ["0:  2 x^3 P a^4 DD x^167 31 x^17 L(432)  >  3 x^70 P", "0: 0 < 1 !"] {
             let conf: Configuration = inp.parse()?;
+            let strip_colors = String::from_utf8(strip_ansi_escapes::strip(conf.to_string())?)?;
             assert_eq!(
                 inp.split_whitespace().collect::<String>(),
-                String::from_utf8(strip_ansi_escapes::strip(conf.to_string())?)?.split_whitespace().collect::<String>()
+                strip_stats_and_steps(strip_colors).split_whitespace().collect::<String>()
             );
         }
         Ok(())
+    }
+
+    fn strip_stats_and_steps(s: String) -> String {
+        s.split(":").skip(1).next().unwrap().split("Stats").next().unwrap().trim().to_owned()
     }
 }
