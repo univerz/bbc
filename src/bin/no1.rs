@@ -358,7 +358,7 @@ impl Configuration {
                 self.rtape.push(Item::D);
                 self.ltape.push(Item::C(1));
                 self.dir = Right;
-                // TODO: update self.stats.num_tm_steps
+                self.stats.num_tm_steps += 15;
             }
             // `x > end` -> `< 3xP`
             (Right, [.., Item::X(exp)], []) => {
@@ -374,7 +374,7 @@ impl Configuration {
                 self.ltape.pop();
                 self.rtape.push(Item::X(1)); // || test Item::P + Item::P
                 self.dir = Left;
-                // TODO: update self.stats.num_tm_steps
+                self.stats.num_tm_steps += 8;
             }
 
             // `> D33` -> `P0 >`
@@ -383,7 +383,7 @@ impl Configuration {
                 self.ltape.push(Item::P);
                 self.ltape.push(Item::C(0));
                 self.stats.record_collision();
-                // TODO: update self.stats.num_tm_steps
+                self.stats.num_tm_steps += 15;
             }
             // `> D3` -> `xP >`
             (Right, _, [.., Item::C(3), Item::D]) => {
@@ -473,7 +473,7 @@ impl Configuration {
                 self.ltape.push(Item::L(2332));
                 self.rtape.pop();
                 self.stats.record_collision();
-                // TODO: update self.stats.num_tm_steps
+                self.stats.num_tm_steps += 4; // A> 1010 -(4)-> 1011 A>
             }
             // `L(2332) <` -> `L(2301) x >`
             (Left, [.., Item::L(2332)], _) => {
@@ -481,14 +481,14 @@ impl Configuration {
                 self.ltape.push(Item::L(2301));
                 self.ltape.push(Item::X(1));
                 self.dir = Right;
-                // TODO: update self.stats.num_tm_steps
+                self.stats.num_tm_steps += 17;
             }
             // `L(2301) <` -> `L(252) >`
             (Left, [.., Item::L(2301)], _) => {
                 self.ltape.pop();
                 self.ltape.push(Item::L(252));
                 self.dir = Right;
-                // TODO: update self.stats.num_tm_steps
+                self.stats.num_tm_steps += 11;
             }
             // `L(252) <` -> `PDx >`
             (Left, [.., Item::L(252)], _) => {
@@ -497,7 +497,7 @@ impl Configuration {
                 self.ltape.push(Item::D);
                 self.ltape.push(Item::X(1));
                 self.dir = Right;
-                // TODO: update self.stats.num_tm_steps
+                self.stats.num_tm_steps += 17;
             }
             // `> PD3x` -> `L(2301) D > P`
             (Right, _, [.., Item::X(exp), Item::C(3), Item::D, Item::P]) => {
@@ -505,7 +505,7 @@ impl Configuration {
                 self.rtape.push(Item::P);
                 self.ltape.push(Item::L(2301));
                 self.ltape.push(Item::D);
-                // TODO: update self.stats.num_tm_steps
+                self.stats.num_tm_steps += 31;
             }
             // `> PDDx` -> `21D >`
             (Right, _, [.., Item::X(exp), Item::D, Item::D, Item::P]) => {
@@ -513,7 +513,7 @@ impl Configuration {
                 self.ltape.push(Item::C(2));
                 self.ltape.push(Item::C(1));
                 self.ltape.push(Item::D);
-                // TODO: update self.stats.num_tm_steps
+                self.stats.num_tm_steps += 77;
             }
             // `2 > 3` (== `13 <`) -> `L(432) >`
             (Right, [.., Item::C(2)], [.., Item::C(3)]) => {
@@ -636,7 +636,7 @@ impl Configuration {
                     self.ltape.pop();
                 }
                 self.ltape.extend_from_slice(&block::LEFT_C);
-                // TODO: update self.stats.num_tm_steps
+                // 0 TM steps
             }
             // `b^n > 3` -> `b^(n-1) expanded-b > 3`
             (Right, [.., Item::E { block: 1, exp }], [.., Item::C(3)]) => {
@@ -1247,10 +1247,10 @@ mod tests {
             let head = match value.dir {
                 Left => {
                     rtape.extend([0, 1]);
-                    Head { state: 2, direction: value.dir } // <C 10 
+                    Head { state: 2, direction: value.dir } // <C 10
                 }
                 Right => {
-                    Head { state: 0, direction: value.dir } // A> 
+                    Head { state: 0, direction: value.dir } // A>
                 }
             };
 
