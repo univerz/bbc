@@ -564,19 +564,23 @@ impl Configuration {
             }
             // `> b^n` -> `b^n >`
             (Right, _, [.., Item::E { block: 1, exp: move_exp }]) => {
+                let move_exp_const = *move_exp;
                 if let Some(Item::E { block: 1, exp }) = self.ltape.last_mut() {
                     *exp = exp.checked_add(*move_exp).unwrap();
                 } else {
                     self.ltape.push(Item::E { block: 1, exp: *move_exp })
                 }
                 self.rtape.pop();
-                // TODO: update self.stats.num_tm_steps
+                // Copied from test.
+                self.stats.num_tm_steps += 1_078_855 * move_exp_const;
             }
             // `b^n <` -> `< b^n`
             (Left, [.., Item::E { block: 1, exp: move_exp }], _) => {
+                let move_exp_const = *move_exp;
                 self.rtape.push(Item::E { block: 1, exp: *move_exp });
                 self.ltape.pop();
-                // TODO: update self.stats.num_tm_steps
+                // Copied from test.
+                self.stats.num_tm_steps += 647_337 * move_exp_const;
             }
             // `c^n <` -> `c^(n-1) expanded-c <`
             (Left, [.., Item::E { block: 2, exp }], _) => {
@@ -601,11 +605,13 @@ impl Configuration {
             }
             // `> P b^n` -> `c^n > P`
             (Right, _, [.., Item::E { block: 1, exp: move_exp }, Item::P]) => {
+                let move_exp_const = *move_exp;
                 self.ltape.push(Item::E { block: 2, exp: *move_exp });
                 pop_n(&mut self.rtape, 2);
                 self.rtape.push(Item::P);
                 self.stats.num_c_create += 1;
-                // TODO: update self.stats.num_tm_steps
+                // Copied from test.
+                self.stats.num_tm_steps += 1_078_905 * move_exp_const;
             }
 
             _ => return Err(Err::UnknownTransition),
@@ -1106,10 +1112,7 @@ mod tests {
             strip_stats_and_steps(from.to_string()),
             strip_stats_and_steps(to.to_string())
         );
-        // TODO: remove if guard @shawn
-        if conf.stats.num_tm_steps != 0 {
-            assert_eq!(conf.stats.num_tm_steps, start.steps);
-        }
+        assert_eq!(conf.stats.num_tm_steps, start.steps);
         println!("\t\traw conf ok");
     }
 
