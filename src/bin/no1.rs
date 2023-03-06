@@ -138,9 +138,6 @@ impl Configuration {
     }
 
     fn naive_accel_idxs(&self) -> Option<Vec<usize>> {
-        if self.dir != Direction::Right {
-            return None;
-        }
         if !self.rtape.first().contains(&&Item::P) || self.rtape.last().contains(&&Item::C(3)) {
             return None; // disable `3` on last position (so all 3s are in a valid position in the middle of a window)
         }
@@ -154,8 +151,7 @@ impl Configuration {
         }
 
         let mut min_exp = 1;
-        let to_exp_idxs: Option<Vec<usize>> = self
-            .rtape
+        self.rtape
             .as_slice()
             .windows(3)
             .enumerate()
@@ -164,7 +160,7 @@ impl Configuration {
                 [Item::X(_), Item::C(3), Item::X(exp_from)] => {
                     if *exp_from > min_exp {
                         min_exp = min_exp.checked_shl(2).unwrap();
-                        Some(Some(idx))
+                        Some(Some(idx + 2))
                     } else {
                         Some(None)
                     }
@@ -172,84 +168,40 @@ impl Configuration {
                 [_, Item::C(3), _] => Some(None), // if there is a `3` then it should be in a valid position
                 _ => None,
             })
-            .collect();
-        if min_exp == 1 { None } else { to_exp_idxs }
-    }
-
-    fn accelerate(&mut self) -> bool {
-        // return false;
-
-        let to_exp_idxs = self.naive_accel_idxs();
-
-        if let Some(idxs) = to_exp_idxs {
-            let mut move_exp_value: Exp = 1;
-            for idx in idxs {
-                if let Some(Item::X(exp)) = self.rtape.get_mut(idx) {
-                    *exp = exp.checked_add(move_exp_value.checked_shl(1).unwrap()).unwrap();
-                } else {
-                    unreachable!()
-                }
-                if let Some(Item::X(exp)) = self.rtape.get_mut(idx + 2) {
-                    *exp -= move_exp_value
-                } else {
-                    unreachable!()
-                }
-                move_exp_value = move_exp_value.checked_shl(2).unwrap();
-            }
-            self.dir = Direction::Left;
-            // There are 4 counter increments for every time the final C moves left.
-            self.stats.num_counter_increments = self.stats.num_counter_increments.checked_add(move_exp_value).unwrap();
-            true
-        } else {
-            false
-        }
+            .collect()
     }
 
     // Count number of "strides" (applications of accelerate()) we could perform before a
     // collision (considering only the right half of the tape).
-    fn count_accel_strides(rtape: &[Item]) -> Exp {
-        if !rtape
-            .iter()
-            .skip(1)
-            .all(|item| matches!(item, Item::D | Item::X(_) | Item::C(3) | Item::E { block: 1, exp: _ }))
-        {
-            return 0;
-        }
-
+    fn count_accel_strides(rtape: &[Item], cidxs: &[usize]) -> Exp {
         let mut min_exp = 1;
-        let max_reps = rtape
-            .windows(3)
-            .rev()
-            .filter_map(|w| match w {
-                [Item::X(_), Item::C(3), Item::X(exp_from)] => {
+        cidxs
+            .iter()
+            .map(|i| {
+                if let Some(Item::X(exp)) = rtape.get(*i) {
                     // Note: We don't want to take exp_from -> 0, so (exp_from - 1) / min_exp
-                    let this_reps = (exp_from.saturating_sub(1)) / min_exp;
+                    let this_reps = (exp.saturating_sub(1)) / min_exp;
                     min_exp = min_exp.checked_shl(2).unwrap();
-                    Some(this_reps)
+                    this_reps
+                } else {
+                    unreachable!()
                 }
-                [_, Item::C(3), _] => Some(0), // if there is a `3` then it should be in a valid position
-                _ => None,
             })
-            .min();
-        if let Some(reps) = max_reps {
-            return reps;
-        } else {
-            // This is the case where there are no Cs on the right. In that case we can do infinite strides b/c there are no Cs to collide!
-            return Exp::MAX;
-        }
+            .min()
+            .unwrap_or(Exp::MAX) // If there are no Cs on the right, we can do infinite strides b/c there are no Cs to collide!
     }
 
     // Apply multiple "strides" (applications of accelerate()) only to right hand side of tape.
     // Used for @uni-cycle acceleration.
-    fn apply_multiple_strides(&mut self, num_strides: Exp, idxs: Vec<usize>) {
+    fn apply_multiple_strides(&mut self, num_strides: Exp, cidxs: &[usize]) {
         let mut move_exp_value = num_strides;
-        for idx in idxs {
-            if let Some(Item::X(exp)) = self.rtape.get_mut(idx) {
+        for &idx in cidxs {
+            if let Some(Item::X(exp)) = self.rtape.get_mut(idx - 2) {
                 *exp = exp.checked_add(move_exp_value.checked_shl(1).unwrap()).unwrap();
             } else {
                 unreachable!()
             }
-            if let Some(Item::X(exp)) = self.rtape.get_mut(idx + 2) {
+            if let Some(Item::X(exp)) = self.rtape.get_mut(idx) {
                 *exp -= move_exp_value
             } else {
                 unreachable!()
@@ -261,12 +213,12 @@ impl Configuration {
     }
 
     // Attempt to apply the @uni-cycle
-    fn try_uni_cycle(&mut self) -> bool {
-        match (self.dir, self.ltape.as_mut_slice(), self.rtape.as_mut_slice()) {
+    fn try_uni_cycle(&mut self, cidxs: &[usize]) -> bool {
+        match (self.ltape.as_mut_slice(), self.rtape.as_mut_slice()) {
             // Example config:
             //   84719:  ! a^1 1 x^7640 D x^10345 3 x^7639 D x^10347 3 x^7635 D x^10355 1 x^7618 D x^10389 2 x^7550 D x^10524 0 x^7279 D x^11066 3 x^6197 D x^13231 1 x^1866 DD x^7713 0 x^95 2D x^598586766 1D >  x^300 D x^30826  b^8 D x^42804942 D x^3076 D x^1538 D x^300 D x^21397226 D x^13012670 D x^2139716 D x^1069858 D x^213964 D x^21621178 D x^3440996 D x^1720498 D x^344092 D x^1414318 D x^223068 D x^211854560 3 x^673806909 P
             #[rustfmt::skip]
-            (Direction::Right,
+            (
                 [.., Item::E { block: 0, exp: a_count },
                     Item::C(1), Item::X(7640), Item::D, Item::X(10345),
                     Item::C(3), Item::X(7639), Item::D, Item::X(10347),
@@ -287,7 +239,7 @@ impl Configuration {
                 // max cycles before big_count is too small.
                 let max_cycles_left = *big_count / UNI_CYCLE_REDUCE;
                 // max_strides is max times we can stride before there is a crash on right side.
-                let max_strides = Self::count_accel_strides(rtape_tail);
+                let max_strides = Self::count_accel_strides(rtape_tail, cidxs);
                 let max_cycles_right = max_strides / UNI_CYCLE_STRIDE;
                 // We cycle until one of the two above is imminent.
                 let num_cycles = cmp::min(max_cycles_left, max_cycles_right);
@@ -299,10 +251,10 @@ impl Configuration {
 
                     // Apply updates to right half of tape.
                     let num_strides = num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap();
-                    if let Some(idxs) = self.naive_accel_idxs() {
-                        self.apply_multiple_strides(num_strides, idxs);
+
+                    if !cidxs.is_empty() {
+                        self.apply_multiple_strides(num_strides, cidxs);
                     } else {
-                        // The only reason that this can fail naive_accel_idxs() is if there are no Cs to the right, in which case striding is easy :)
                         assert!(self
                             .rtape
                             .iter()
@@ -312,13 +264,10 @@ impl Configuration {
                     }
                     return true;
                 }
-                return false;
             }
-            _ => {
-                // We are not in a @uni-cycle.
-                return false;
-            }
+            _ => (), // We are not in a @uni-cycle.
         }
+        false
     }
 
     fn step(&mut self) -> Result<(), Err> {
@@ -367,7 +316,7 @@ impl Configuration {
                 self.rtape.push(Item::X(1));
                 self.rtape.push(Item::C(3));
                 self.dir = Left;
-                self.stats.num_tm_steps += 79;  // x A> $ -(79)-> <C10 C3 x R
+                self.stats.num_tm_steps += 79; // x A> $ -(79)-> <C10 C3 x R
             }
             // `D > end` -> `< x`
             (Right, [.., Item::D], []) => {
@@ -391,7 +340,7 @@ impl Configuration {
                 push_or_merge_x(&mut self.ltape, 1);
                 self.ltape.push(Item::P);
                 self.stats.record_collision();
-                self.stats.num_tm_steps += 11;  // > D3 -(7)-> D > 3 -(4)-> 011 01 1011 A>
+                self.stats.num_tm_steps += 11; // > D3 -(7)-> D > 3 -(4)-> 011 01 1011 A>
             }
 
             // `x^n <` -> `< x^n`
@@ -399,7 +348,7 @@ impl Configuration {
                 let exp_const = *exp;
                 push_or_merge_x(&mut self.rtape, *exp);
                 self.ltape.pop();
-                self.stats.num_tm_steps += 6 * exp_const;  // 011 <C10 -(3)-> <C10 110
+                self.stats.num_tm_steps += 6 * exp_const; // 011 <C10 -(3)-> <C10 110
             }
             // `D <` -> `< D`
             (Left, [.., Item::D], _) => {
@@ -414,39 +363,39 @@ impl Configuration {
                         self.rtape.push(Item::E { block: 1, exp: 1 })
                     }
                 }
-                self.stats.num_tm_steps += 9;  // 011 01 <C10 -(6)-> 011 <C10 10 -(3)-> <C10 110 10
+                self.stats.num_tm_steps += 9; // 011 01 <C10 -(6)-> 011 <C10 10 -(3)-> <C10 110 10
             }
             // `P <` -> `< P`
             (Left, [.., Item::P], _) => {
                 let item = self.ltape.pop().unwrap();
                 self.rtape.push(item);
-                self.stats.num_tm_steps += 3;  // 011 <C10 -(3)-> <C10 110
+                self.stats.num_tm_steps += 3; // 011 <C10 -(3)-> <C10 110
             }
             // `3 <` -> `< 3`
             (Left, [.., Item::C(3)], _) => {
                 let item = self.ltape.pop().unwrap();
                 self.rtape.push(item);
-                self.stats.num_tm_steps += 12;  // 01 <C10 -(6)-> <C10 10
+                self.stats.num_tm_steps += 12; // 01 <C10 -(6)-> <C10 10
             }
             // `0 <` -> `1x >`
             (Left, [.., Item::C(c @ 0)], _) => {
                 *c += 1;
                 self.ltape.push(Item::X(1));
                 self.dir = Right;
-                self.stats.num_tm_steps += 17;  // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
+                self.stats.num_tm_steps += 17; // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
             }
             // `1 <` -> `2 >`
             (Left, [.., Item::C(c @ 1)], _) => {
                 *c += 1;
                 self.dir = Right;
-                self.stats.num_tm_steps += 11;  // 001 <C10 -(11)-> 11011 A>
+                self.stats.num_tm_steps += 11; // 001 <C10 -(11)-> 11011 A>
             }
             // `2 <` -> `3x >`
             (Left, [.., Item::C(c @ 2)], _) => {
                 *c += 1;
                 self.ltape.push(Item::X(1));
                 self.dir = Right;
-                self.stats.num_tm_steps += 17;  // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
+                self.stats.num_tm_steps += 17; // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
             }
 
             // `x > 3` -> `0 >` // changed from `> x^n 3` -> `x^(n-1) 0 >`
@@ -464,7 +413,7 @@ impl Configuration {
                 }
                 self.ltape.push(Item::C(0));
                 self.rtape.pop();
-                self.stats.num_tm_steps += 4;  // A> 1010 -(4)-> 1011 A>
+                self.stats.num_tm_steps += 4; // A> 1010 -(4)-> 1011 A>
             }
 
             // `0 > 3` (== `> x33`) -> `L(2332) >`
@@ -521,7 +470,7 @@ impl Configuration {
                 self.ltape.push(Item::L(432));
                 self.rtape.pop();
                 self.stats.record_collision();
-                self.stats.num_tm_steps += 4;  // A> 1010 -(4)-> 1011 A>
+                self.stats.num_tm_steps += 4; // A> 1010 -(4)-> 1011 A>
             }
             // `L(432) <` -> `L(401) x >`
             (Left, [.., Item::L(432)], _) => {
@@ -529,14 +478,14 @@ impl Configuration {
                 self.ltape.push(Item::L(401));
                 self.ltape.push(Item::X(1));
                 self.dir = Right;
-                self.stats.num_tm_steps += 17;  // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
+                self.stats.num_tm_steps += 17; // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
             }
             // `L(401) <` -> `L(62) >`
             (Left, [.., Item::L(401)], _) => {
                 self.ltape.pop();
                 self.ltape.push(Item::L(62));
                 self.dir = Right;
-                self.stats.num_tm_steps += 11;  // 001 <C10 -(11)-> 11011 A>
+                self.stats.num_tm_steps += 11; // 001 <C10 -(11)-> 11011 A>
             }
             // `L(62) <` -> `L(31) x >`
             (Left, [.., Item::L(62)], _) => {
@@ -544,7 +493,7 @@ impl Configuration {
                 self.ltape.push(Item::L(31));
                 self.ltape.push(Item::X(1));
                 self.dir = Right;
-                self.stats.num_tm_steps += 17;  // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
+                self.stats.num_tm_steps += 17; // 111 011 <C10 -(3)-> 111 <C10 110 -(14)-> 01 011 011 A>
             }
             // `x L(31) <` -> `P1D >`
             (Left, [.., Item::X(exp), Item::L(31)], _) => {
@@ -553,7 +502,7 @@ impl Configuration {
                 self.ltape.push(Item::C(1));
                 self.ltape.push(Item::D);
                 self.dir = Right;
-                self.stats.num_tm_steps += 17;  // 111 01 <C10 -(6)-> 111 <C10 10 -(4)-> 01 A> 110 10 -(7)-> 01 011 01 A>
+                self.stats.num_tm_steps += 17; // 111 01 <C10 -(6)-> 111 <C10 10 -(4)-> 01 A> 110 10 -(7)-> 01 011 01 A>
             }
 
             // `> P x^n` -> `x^n > P`
@@ -562,14 +511,14 @@ impl Configuration {
                 push_or_merge_x(&mut self.ltape, *exp);
                 pop_n(&mut self.rtape, 2);
                 self.rtape.push(Item::P);
-                self.stats.num_tm_steps += 10 * exp_const;  // A> 110110 -(10)-> 011011 A>
+                self.stats.num_tm_steps += 10 * exp_const; // A> 110110 -(10)-> 011011 A>
             }
             // `> PDP` -> `1D >`
             (Right, _, [.., Item::P, Item::D, Item::P]) => {
                 pop_n(&mut self.rtape, 3);
                 self.ltape.push(Item::C(1));
                 self.ltape.push(Item::D);
-                self.stats.num_tm_steps += 27;  // A> 110 110 10 110 -(10)-> 011 011 A> 10 110 -(6)-> 011 0 111 <C10 10 -(4)-> 011 001 A> 110 10 -(7)-> 011 001 011 01 A>
+                self.stats.num_tm_steps += 27; // A> 110 110 10 110 -(10)-> 011 011 A> 10 110 -(6)-> 011 0 111 <C10 10 -(4)-> 011 001 A> 110 10 -(7)-> 011 001 011 01 A>
             }
             // `> PDx` -> `1D > P`
             (Right, _, [.., Item::X(exp), Item::D, Item::P]) => {
@@ -577,7 +526,7 @@ impl Configuration {
                 self.rtape.push(Item::P);
                 self.ltape.push(Item::C(1));
                 self.ltape.push(Item::D);
-                self.stats.num_tm_steps += 27;  // A> 110 110 10 110 -(10)-> 011 011 A> 10 110 -(6)-> 011 0 111 <C10 10 -(4)-> 011 001 A> 110 10 -(7)-> 011 001 011 01 A>
+                self.stats.num_tm_steps += 27; // A> 110 110 10 110 -(10)-> 011 011 A> 10 110 -(6)-> 011 0 111 <C10 10 -(4)-> 011 001 A> 110 10 -(7)-> 011 001 011 01 A>
             }
             // `> P3x` -> `< PDP`
             (Right, _, [.., Item::X(exp), Item::C(3), Item::P]) => {
@@ -586,32 +535,32 @@ impl Configuration {
                 self.rtape.push(Item::D);
                 self.rtape.push(Item::P);
                 self.dir = Left;
-                self.stats.num_tm_steps += 19;  // A> 110 10 10 110 -(7)-> 011 01 A> 10 110 -(6)-> 011 011 <C10 10 -(6)-> <C10 110 110 10
+                self.stats.num_tm_steps += 19; // A> 110 10 10 110 -(7)-> 011 01 A> 10 110 -(6)-> 011 011 <C10 10 -(6)-> <C10 110 110 10
             }
             // `> P end` -> `< P`
             (Right, _, [Item::P]) => {
                 self.dir = Left;
                 self.stats.num_counter_increments = self.stats.num_counter_increments.checked_add(1).unwrap();
-                self.stats.num_tm_steps += 9;  // A> 110 $ -(6)-> 011 <C10 $ -(3)-> <C10 110 $
+                self.stats.num_tm_steps += 9; // A> 110 $ -(6)-> 011 <C10 $ -(3)-> <C10 110 $
             }
             // `> PP` -> `x >` // changed from `> PP end`
             (Right, _, [.., Item::P, Item::P]) => {
                 pop_n(&mut self.rtape, 2);
                 push_or_merge_x(&mut self.ltape, 1);
-                self.stats.num_tm_steps += 10;  // A> 110110 -(5)-> 011 B> 110 -(5)-> 011011 A>
+                self.stats.num_tm_steps += 10; // A> 110110 -(5)-> 011 B> 110 -(5)-> 011011 A>
             }
             // `> D` -> `D >`
             (Right, _, [.., Item::D]) => {
                 self.rtape.pop();
                 self.ltape.push(Item::D);
-                self.stats.num_tm_steps += 7;  // A> 11010 -(5)-> 011 B> 10 -(2)-> 01101 A>
+                self.stats.num_tm_steps += 7; // A> 11010 -(5)-> 011 B> 10 -(2)-> 01101 A>
             }
             // `> x^n` -> `x^n >`
             (Right, _, [.., Item::X(exp)]) => {
                 let exp_const = *exp;
                 push_or_merge_x(&mut self.ltape, *exp);
                 self.rtape.pop();
-                self.stats.num_tm_steps += 10 * exp_const;  // A> 110110 -(10)-> 011011 A>
+                self.stats.num_tm_steps += 10 * exp_const; // A> 110110 -(10)-> 011011 A>
             }
             // `> b^n` -> `b^n >`
             (Right, _, [.., Item::E { block: 1, exp: move_exp }]) => {
@@ -666,18 +615,23 @@ impl Configuration {
     }
 
     fn gen_step(&mut self, cfg: Config) -> Result<(), Err> {
-        if cfg.accel_uni_cycles {
-            if self.try_uni_cycle() {
-                self.stats.num_uni_cycles += 1;
-                return Ok(());
+        if self.dir == Direction::Right && (cfg.accel_uni_cycles || cfg.accel_counters) {
+            if let Some(idxs) = self.naive_accel_idxs() {
+                if cfg.accel_uni_cycles {
+                    if self.try_uni_cycle(&idxs) {
+                        self.stats.num_uni_cycles += 1;
+                        return Ok(());
+                    }
+                }
+
+                if cfg.accel_counters && !idxs.is_empty() {
+                    self.apply_multiple_strides(1, &idxs);
+                    self.dir = Direction::Left;
+                    return Ok(());
+                }
             }
         }
-        if cfg.accel_counters {
-            if self.accelerate() {
-                self.stats.num_strides += 1;
-                return Ok(());
-            }
-        }
+
         self.step()
     }
 
