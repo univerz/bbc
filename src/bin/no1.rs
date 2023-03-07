@@ -7,7 +7,6 @@ use color_eyre::eyre::Result;
 use derivative::Derivative;
 use itertools::Itertools;
 use owo_colors::OwoColorize;
-use std::cmp;
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs::File;
@@ -122,6 +121,76 @@ impl SimStats {
 // x {62}  <   ->  x {31}  x >
 // x {31}  <   ->    P C1 D  >
 
+struct CounterAccel {
+    max_apply: Exp,
+    idxs: Vec<usize>,
+}
+
+impl CounterAccel {
+    fn new(rtape: &[Item]) -> Option<CounterAccel> {
+        if !rtape.first().contains(&&Item::P) {
+            return None;
+        }
+
+        #[derive(PartialEq)]
+        enum Prev {
+            X,
+            C,
+            Other,
+        }
+        let mut prev = Prev::Other;
+        let mut min_exp = 1;
+        let mut from_exp: Exp = 0;
+
+        // `x C x` is the only valid sequence that contains C; DCxb are allowed
+        rtape.iter().enumerate().skip(1).rev().try_fold(
+            CounterAccel { max_apply: Exp::MAX, idxs: Vec::new() },
+            |mut acc, (idx, item)| {
+                prev = match item {
+                    Item::C(_) if prev == Prev::X => Prev::C,
+                    Item::X(exp) => {
+                        if prev == Prev::C {
+                            // x(from_exp) C x(exp)
+                            // Note: We don't want to take exp_from -> 0, so (exp_from - 1) / min_exp
+                            acc.max_apply = acc.max_apply.min((from_exp.saturating_sub(1)) / min_exp);
+                            if acc.max_apply == 0 {
+                                return None;
+                            }
+                            min_exp = min_exp.checked_shl(2).unwrap();
+                            acc.idxs.push(idx);
+                        }
+                        from_exp = *exp;
+                        Prev::X
+                    }
+                    Item::D | Item::E { block: 1, exp: _ } if prev != Prev::C => Prev::Other,
+                    _ => return None,
+                };
+                Some(acc)
+            },
+        )
+    }
+
+    fn apply(&self, num_strides: Exp, rtape: &mut Tape, stats: &mut SimStats) {
+        assert!(self.max_apply >= num_strides);
+        let mut move_exp_value = num_strides;
+        self.idxs.iter().for_each(|&idx| {
+            if let Some(Item::X(exp)) = rtape.get_mut(idx) {
+                *exp = exp.checked_add(move_exp_value.checked_shl(1).unwrap()).unwrap();
+            } else {
+                unreachable!()
+            }
+            if let Some(Item::X(exp)) = rtape.get_mut(idx + 2) {
+                *exp -= move_exp_value
+            } else {
+                unreachable!()
+            }
+            move_exp_value = move_exp_value.checked_shl(2).unwrap();
+        });
+        // There are 4 counter increments for every time the final C moves left.
+        stats.num_counter_increments = stats.num_counter_increments.checked_add(move_exp_value).unwrap();
+    }
+}
+
 impl Configuration {
     pub fn new() -> Configuration {
         // $ cargo run --release --bin on2 5 0
@@ -137,83 +206,8 @@ impl Configuration {
         }
     }
 
-    fn naive_accel_idxs(&self) -> Option<Vec<usize>> {
-        if !self.rtape.first().contains(&&Item::P) || self.rtape.last().contains(&&Item::C(3)) {
-            return None; // disable `3` on last position (so all 3s are in a valid position in the middle of a window)
-        }
-        if !self
-            .rtape
-            .iter()
-            .skip(1)
-            .all(|item| matches!(item, Item::D | Item::X(_) | Item::C(3) | Item::E { block: 1, exp: _ }))
-        {
-            return None;
-        }
-
-        let mut min_exp = 1;
-        self.rtape
-            .as_slice()
-            .windows(3)
-            .enumerate()
-            .rev()
-            .filter_map(|(idx, w)| match w {
-                [Item::X(_), Item::C(3), Item::X(exp_from)] => {
-                    if *exp_from > min_exp {
-                        min_exp = min_exp.checked_shl(2).unwrap();
-                        Some(Some(idx + 2))
-                    } else {
-                        Some(None)
-                    }
-                }
-                [_, Item::C(3), _] => Some(None), // if there is a `3` then it should be in a valid position
-                _ => None,
-            })
-            .collect()
-    }
-
-    // Count number of "strides" (applications of accelerate()) we could perform before a
-    // collision (considering only the right half of the tape).
-    fn count_accel_strides(rtape: &[Item], cidxs: &[usize]) -> Exp {
-        let mut min_exp = 1;
-        cidxs
-            .iter()
-            .map(|i| {
-                if let Some(Item::X(exp)) = rtape.get(*i) {
-                    // Note: We don't want to take exp_from -> 0, so (exp_from - 1) / min_exp
-                    let this_reps = (exp.saturating_sub(1)) / min_exp;
-                    min_exp = min_exp.checked_shl(2).unwrap();
-                    this_reps
-                } else {
-                    unreachable!()
-                }
-            })
-            .min()
-            .unwrap_or(Exp::MAX) // If there are no Cs on the right, we can do infinite strides b/c there are no Cs to collide!
-    }
-
-    // Apply multiple "strides" (applications of accelerate()) only to right hand side of tape.
-    // Used for @uni-cycle acceleration.
-    fn apply_multiple_strides(&mut self, num_strides: Exp, cidxs: &[usize]) {
-        let mut move_exp_value = num_strides;
-        for &idx in cidxs {
-            if let Some(Item::X(exp)) = self.rtape.get_mut(idx - 2) {
-                *exp = exp.checked_add(move_exp_value.checked_shl(1).unwrap()).unwrap();
-            } else {
-                unreachable!()
-            }
-            if let Some(Item::X(exp)) = self.rtape.get_mut(idx) {
-                *exp -= move_exp_value
-            } else {
-                unreachable!()
-            }
-            move_exp_value = move_exp_value.checked_shl(2).unwrap();
-        }
-        // There are 4 counter increments for every time the final C moves left.
-        self.stats.num_counter_increments = self.stats.num_counter_increments.checked_add(move_exp_value).unwrap();
-    }
-
-    // Attempt to apply the @uni-cycle
-    fn try_uni_cycle(&mut self, cidxs: &[usize]) -> bool {
+    // Attempt to apply the @uni-cycle https://www.sligocki.com/2023/02/25/skelet-1-wip.html
+    fn try_uni_cycle(&mut self, counter: &CounterAccel) -> bool {
         match (self.ltape.as_mut_slice(), self.rtape.as_mut_slice()) {
             // Example config:
             //   84719:  ! a^1 1 x^7640 D x^10345 3 x^7639 D x^10347 3 x^7635 D x^10355 1 x^7618 D x^10389 2 x^7550 D x^10524 0 x^7279 D x^11066 3 x^6197 D x^13231 1 x^1866 DD x^7713 0 x^95 2D x^598586766 1D >  x^300 D x^30826  b^8 D x^42804942 D x^3076 D x^1538 D x^300 D x^21397226 D x^13012670 D x^2139716 D x^1069858 D x^213964 D x^21621178 D x^3440996 D x^1720498 D x^344092 D x^1414318 D x^223068 D x^211854560 3 x^673806909 P
@@ -231,18 +225,17 @@ impl Configuration {
                     Item::C(0), Item::X(95),
                     Item::C(2), Item::D, Item::X(big_count),
                     Item::C(1), Item::D],
-                [rtape_tail @ .., Item::E { block: 1, exp: b_count },
-                    Item::X(30826), Item::D, Item::X(300)]) => {
-                // Each cycle reduces big_count by UNI_CYCLE_REDUCE and strides UNI_CYCLE_STRIDE times.
+                [.., Item::E { block: 1, exp: b_count }, Item::X(30826), Item::D, Item::X(300)]
+            ) => {
+                // Each cycle reduces big_count by UNI_CYCLE_REDUCE and counter UNI_CYCLE_STRIDE times.
                 const UNI_CYCLE_REDUCE : Exp = 53946;
                 const UNI_CYCLE_STRIDE : Exp = 53946 * 4 - 5;
                 // max cycles before big_count is too small.
                 let max_cycles_left = *big_count / UNI_CYCLE_REDUCE;
-                // max_strides is max times we can stride before there is a crash on right side.
-                let max_strides = Self::count_accel_strides(rtape_tail, cidxs);
-                let max_cycles_right = max_strides / UNI_CYCLE_STRIDE;
+                // max cycles before there is a crash on right side.
+                let max_cycles_right = counter.max_apply / UNI_CYCLE_STRIDE;
                 // We cycle until one of the two above is imminent.
-                let num_cycles = cmp::min(max_cycles_left, max_cycles_right);
+                let num_cycles = max_cycles_left.min(max_cycles_right);
                 if num_cycles > 0 {
                     // Apply updates to left half of tape.
                     *big_count -= num_cycles.checked_mul(UNI_CYCLE_REDUCE).unwrap();
@@ -251,17 +244,8 @@ impl Configuration {
 
                     // Apply updates to right half of tape.
                     let num_strides = num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap();
+                    counter.apply(num_strides, &mut self.rtape, &mut self.stats);
 
-                    if !cidxs.is_empty() {
-                        self.apply_multiple_strides(num_strides, cidxs);
-                    } else {
-                        assert!(self
-                            .rtape
-                            .iter()
-                            .skip(1)
-                            .all(|item| matches!(item, Item::D | Item::X(_) | Item::E { block: 1, exp: _ })));
-                        self.stats.num_counter_increments = self.stats.num_counter_increments.checked_add(num_strides).unwrap();
-                    }
                     return true;
                 }
             }
@@ -622,16 +606,16 @@ impl Configuration {
 
     fn gen_step(&mut self, cfg: Config) -> Result<(), Err> {
         if self.dir == Direction::Right && (cfg.accel_uni_cycles || cfg.accel_counters) {
-            if let Some(idxs) = self.naive_accel_idxs() {
+            if let Some(counter) = CounterAccel::new(&self.rtape) {
                 if cfg.accel_uni_cycles {
-                    if self.try_uni_cycle(&idxs) {
+                    if self.try_uni_cycle(&counter) {
                         self.stats.num_uni_cycles += 1;
                         return Ok(());
                     }
                 }
 
-                if cfg.accel_counters && !idxs.is_empty() {
-                    self.apply_multiple_strides(1, &idxs);
+                if cfg.accel_counters && !counter.idxs.is_empty() {
+                    counter.apply(1, &mut self.rtape, &mut self.stats);
                     self.dir = Direction::Left;
                     return Ok(());
                 }
