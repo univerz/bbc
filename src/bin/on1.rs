@@ -354,9 +354,9 @@ struct Config {
     print_mod: u8,
 }
 
-// new run:               cargo run --release --bin no1 60 30
-// explore configuration: cargo run --release --bin no1 8 0 --conf "!  A> a^4 1010 a^2 11"
-// explore in tui:        cargo run --release --bin no1 8 0 --conf "a^61652 10 E>  d^11104" --tui
+// new run:               cargo run --release --bin on1 60 30
+// explore configuration: cargo run --release --bin on1 8 0 --conf "!  A> a^4 1010 a^2 11"
+// explore in tui:        cargo run --release --bin on1 8 0 --conf "a^61652 10 E>  d^11104" --tui
 fn main() -> Result<()> {
     color_eyre::install()?;
 

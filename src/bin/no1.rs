@@ -182,7 +182,7 @@ struct Configuration {
 
 impl Configuration {
     pub fn new() -> Configuration {
-        // $ cargo run --release --bin on2 5 0
+        // $ cargo run --release --bin on1 5 0
         // ...
         // `28:  11001 <C 1011` == `C1 < P`
 
