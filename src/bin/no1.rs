@@ -5,13 +5,13 @@ use argh::FromArgs;
 use bbc::machine::Direction;
 use color_eyre::eyre::Result;
 use derivative::Derivative;
-use itertools::Itertools;
 use owo_colors::OwoColorize;
-use std::collections::VecDeque;
-use std::fmt;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
-use std::str::FromStr;
+use std::{
+    collections::VecDeque,
+    fmt,
+    io::{self, Write},
+    str::FromStr,
+};
 use termion::{event::Key, input::TermRead, raw::IntoRawMode, screen::IntoAlternateScreen};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,20 +83,6 @@ struct SimStats {
     log2_collision_times_hist: [Exp; 20],
 }
 
-#[derive(Derivative)]
-#[derivative(PartialEq)]
-#[derive(Clone, Debug)]
-struct Configuration {
-    ltape: Tape,
-    rtape: Tape,
-    /// `<C 10` | `A>`
-    dir: Direction,
-    sim_step: usize,
-
-    #[derivative(PartialEq = "ignore")]
-    stats: SimStats,
-}
-
 impl SimStats {
     fn record_collision(&mut self) {
         self.num_collisions += 1;
@@ -109,17 +95,6 @@ impl SimStats {
         self.last_collision_incr = self.num_counter_increments;
     }
 }
-
-// >  xCC      ->  {2332}    >
-//   {2332} <  ->  {2301}  x >
-//   {2301} <  ->  {252}     >
-//   {252}  <  ->    PDx     >
-//
-// x C1 C  <   ->  x {432}   >
-// x {432} <   ->  x {401} x >
-// x {401} <   ->  x {62}    >
-// x {62}  <   ->  x {31}  x >
-// x {31}  <   ->    P C1 D  >
 
 struct CounterAccel {
     max_apply: Exp,
@@ -191,6 +166,20 @@ impl CounterAccel {
     }
 }
 
+#[derive(Derivative)]
+#[derivative(PartialEq)]
+#[derive(Clone, Debug)]
+struct Configuration {
+    ltape: Tape,
+    rtape: Tape,
+    /// `<C 10` | `A>`
+    dir: Direction,
+    sim_step: usize,
+
+    #[derivative(PartialEq = "ignore")]
+    stats: SimStats,
+}
+
 impl Configuration {
     pub fn new() -> Configuration {
         // $ cargo run --release --bin on2 5 0
@@ -204,54 +193,6 @@ impl Configuration {
             sim_step: 0,
             stats: Default::default(),
         }
-    }
-
-    // Attempt to apply the @uni-cycle https://www.sligocki.com/2023/02/25/skelet-1-wip.html
-    fn try_uni_cycle(&mut self, counter: &CounterAccel) -> bool {
-        match (self.ltape.as_mut_slice(), self.rtape.as_mut_slice()) {
-            // Example config:
-            //   84719:  ! a^1 1 x^7640 D x^10345 3 x^7639 D x^10347 3 x^7635 D x^10355 1 x^7618 D x^10389 2 x^7550 D x^10524 0 x^7279 D x^11066 3 x^6197 D x^13231 1 x^1866 DD x^7713 0 x^95 2D x^598586766 1D >  x^300 D x^30826  b^8 D x^42804942 D x^3076 D x^1538 D x^300 D x^21397226 D x^13012670 D x^2139716 D x^1069858 D x^213964 D x^21621178 D x^3440996 D x^1720498 D x^344092 D x^1414318 D x^223068 D x^211854560 3 x^673806909 P
-            #[rustfmt::skip]
-            (
-                [.., Item::E { block: 0, exp: a_count },
-                    Item::C(1), Item::X(7640), Item::D, Item::X(10345),
-                    Item::C(3), Item::X(7639), Item::D, Item::X(10347),
-                    Item::C(3), Item::X(7635), Item::D, Item::X(10355),
-                    Item::C(1), Item::X(7618), Item::D, Item::X(10389),
-                    Item::C(2), Item::X(7550), Item::D, Item::X(10524),
-                    Item::C(0), Item::X(7279), Item::D, Item::X(11066),
-                    Item::C(3), Item::X(6197), Item::D, Item::X(13231),
-                    Item::C(1), Item::X(1866), Item::D, Item::D, Item::X(7713),
-                    Item::C(0), Item::X(95),
-                    Item::C(2), Item::D, Item::X(big_count),
-                    Item::C(1), Item::D],
-                [.., Item::E { block: 1, exp: b_count }, Item::X(30826), Item::D, Item::X(300)]
-            ) => {
-                // Each cycle reduces big_count by UNI_CYCLE_REDUCE and counter UNI_CYCLE_STRIDE times.
-                const UNI_CYCLE_REDUCE : Exp = 53946;
-                const UNI_CYCLE_STRIDE : Exp = 53946 * 4 - 5;
-                // max cycles before big_count is too small.
-                let max_cycles_left = *big_count / UNI_CYCLE_REDUCE;
-                // max cycles before there is a crash on right side.
-                let max_cycles_right = counter.max_apply / UNI_CYCLE_STRIDE;
-                // We cycle until one of the two above is imminent.
-                let num_cycles = max_cycles_left.min(max_cycles_right);
-                if num_cycles > 0 {
-                    // Apply updates to left half of tape.
-                    *big_count -= num_cycles.checked_mul(UNI_CYCLE_REDUCE).unwrap();
-                    *a_count = a_count.checked_add(num_cycles).unwrap();
-                    *b_count = b_count.checked_add(num_cycles).unwrap();
-
-                    // Apply updates to right half of tape.
-                    let num_strides = num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap();
-                    counter.apply(num_strides, &mut self.rtape, &mut self.stats);
-
-                    return true;
-                }
-            }
-            _ => (), // We are not in a @uni-cycle.
-        }
-        false
     }
 
     fn step(&mut self) -> Result<(), Err> {
@@ -604,6 +545,51 @@ impl Configuration {
         Ok(())
     }
 
+    // Attempt to apply the @uni-cycle https://www.sligocki.com/2023/02/25/skelet-1-wip.html
+    #[rustfmt::skip]
+    fn try_uni_cycle(&mut self, counter: &CounterAccel) -> bool {
+        // Example config:
+        //   84719:  ! a^1 1 x^7640 D x^10345 3 x^7639 D x^10347 3 x^7635 D x^10355 1 x^7618 D x^10389 2 x^7550 D x^10524 0 x^7279 D x^11066 3 x^6197 D x^13231 1 x^1866 DD x^7713 0 x^95 2D x^598586766 1D >  x^300 D x^30826  b^8 D x^42804942 D x^3076 D x^1538 D x^300 D x^21397226 D x^13012670 D x^2139716 D x^1069858 D x^213964 D x^21621178 D x^3440996 D x^1720498 D x^344092 D x^1414318 D x^223068 D x^211854560 3 x^673806909 P
+        if let (
+            [.., Item::E { block: 0, exp: a_count },
+                Item::C(1), Item::X(7640), Item::D, Item::X(10345),
+                Item::C(3), Item::X(7639), Item::D, Item::X(10347),
+                Item::C(3), Item::X(7635), Item::D, Item::X(10355),
+                Item::C(1), Item::X(7618), Item::D, Item::X(10389),
+                Item::C(2), Item::X(7550), Item::D, Item::X(10524),
+                Item::C(0), Item::X(7279), Item::D, Item::X(11066),
+                Item::C(3), Item::X(6197), Item::D, Item::X(13231),
+                Item::C(1), Item::X(1866), Item::D, Item::D, Item::X(7713),
+                Item::C(0), Item::X(95),
+                Item::C(2), Item::D, Item::X(big_count),
+                Item::C(1), Item::D],
+            [.., Item::E { block: 1, exp: b_count }, Item::X(30826), Item::D, Item::X(300)]
+        ) = (self.ltape.as_mut_slice(), self.rtape.as_mut_slice()) {
+            // Each cycle reduces big_count by UNI_CYCLE_REDUCE and counter UNI_CYCLE_STRIDE times.
+            const UNI_CYCLE_REDUCE : Exp = 53946;
+            const UNI_CYCLE_STRIDE : Exp = 53946 * 4 - 5;
+            // max cycles before big_count is too small.
+            let max_cycles_left = *big_count / UNI_CYCLE_REDUCE;
+            // max cycles before there is a crash on right side.
+            let max_cycles_right = counter.max_apply / UNI_CYCLE_STRIDE;
+            // We cycle until one of the two above is imminent.
+            let num_cycles = max_cycles_left.min(max_cycles_right);
+            if num_cycles > 0 {
+                // Apply updates to left half of tape.
+                *big_count -= num_cycles.checked_mul(UNI_CYCLE_REDUCE).unwrap();
+                *a_count = a_count.checked_add(num_cycles).unwrap();
+                *b_count = b_count.checked_add(num_cycles).unwrap();
+
+                // Apply updates to right half of tape.
+                let num_strides = num_cycles.checked_mul(UNI_CYCLE_STRIDE).unwrap();
+                counter.apply(num_strides, &mut self.rtape, &mut self.stats);
+
+                return true;
+            }
+        }
+        false
+    }
+
     fn gen_step(&mut self, cfg: Config) -> Result<(), Err> {
         if self.dir == Direction::Right && (cfg.accel_uni_cycles || cfg.accel_counters) {
             if let Some(counter) = CounterAccel::new(&self.rtape) {
@@ -651,11 +637,6 @@ impl Configuration {
     }
 }
 
-const DSP_ROTATE_TAPE: bool = false;
-const DSP_HIDE_X: bool = false;
-// const DSP_ROTATE_TAPE: bool = true;
-// const DSP_HIDE_X: bool = true;
-
 impl fmt::Display for Item {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
@@ -663,10 +644,11 @@ impl fmt::Display for Item {
             Item::P => write!(f, "P"),
             Item::C(s) => write!(f, "{}", s.italic().bold()),
             Item::X(exp) => {
-                if DSP_HIDE_X {
-                    return Ok(());
+                if exp > 1_000_000_000 {
+                    write!(f, " x^{} ", exp.bright_white())
+                } else {
+                    write!(f, " x^{} ", exp)
                 }
-                if exp > 1_000_000_000 { write!(f, " x^{} ", exp.bright_white()) } else { write!(f, " x^{} ", exp) }
             }
             Item::L(r) => write!(f, " L({r}) "),
             Item::E { block, exp } => write!(f, " {}^{} ", ((block + b'a') as char).yellow().bold(), exp),
@@ -678,15 +660,9 @@ impl fmt::Display for Item {
 impl fmt::Display for Configuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: ", self.sim_step.bright_white())?;
-        if DSP_ROTATE_TAPE {
-            self.rtape.iter().try_for_each(|item| write!(f, "{item}"))?;
-            write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
-            self.ltape.iter().rev().try_for_each(|item| write!(f, "{item}"))?;
-        } else {
-            self.ltape.iter().try_for_each(|item| write!(f, "{item}"))?;
-            write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
-            self.rtape.iter().rev().try_for_each(|item| write!(f, "{item}"))?;
-        }
+        self.ltape.iter().try_for_each(|item| write!(f, "{item}"))?;
+        write!(f, " {} ", if self.dir == Direction::Left { '<' } else { '>' }.bright_green().bold())?;
+        self.rtape.iter().rev().try_for_each(|item| write!(f, "{item}"))?;
         write!(f, "   {}", self.stats)
     }
 }
@@ -763,13 +739,6 @@ fn raw_parse(s: &str) -> Result<(Configuration, Direction)> {
     Ok((conf, active_tape_dir))
 }
 
-// fn parse(s: &str) -> Result<Tape> {
-//     let (conf, dir) = raw_parse(s)?;
-//     assert_eq!(dir, Direction::Left);
-
-//     Ok(conf.ltape)
-// }
-
 impl FromStr for Configuration {
     type Err = color_eyre::Report;
 
@@ -837,7 +806,6 @@ fn main() -> Result<()> {
         print_only_cycles: args.print_only_cycles,
     };
     let mut conf = args.conf;
-    // dbg!(cfg);
     println!("{}", conf);
 
     if args.tui {
@@ -902,51 +870,11 @@ fn tui(mut conf: Configuration, mut cfg: Config) -> Result<()> {
     Ok(())
 }
 
-#[allow(unused)]
-fn transcode() -> Result<()> {
-    let file = File::open("/home/univerz/projects/bbc/.data/no1/no2_21")?;
-    let lines = BufReader::new(file).lines();
-
-    for line in lines {
-        let line = String::from_utf8(strip_ansi_escapes::strip(line?)?)?;
-        // dbg!(&line);
-        let conf: Configuration = line.parse()?;
-        // dbg!(&conf);
-
-        fn fmt_symbol(item: &Item) -> String {
-            match *item {
-                Item::X(_) => String::new(),
-                // Item::X(_) => format!("."),
-                Item::E { block, exp: _ } => format!("{}", ((block + b'a') as char).yellow().bold()),
-                _ => format!("{item}"),
-            }
-        }
-
-        let ltake = 500usize.saturating_sub(conf.rtape.len());
-        let mut conf = format!(
-            "{} {} {} {}",
-            conf.sim_step,
-            conf.rtape.iter().map(|item| fmt_symbol(item)).join(""),
-            conf.dir.bright_green().bold(),
-            conf.ltape.iter().rev().take(ltake).map(|item| fmt_symbol(item)).join("")
-        );
-        println!("{}", conf);
-
-        // print!("{}:  ", conf.sim_step);
-        // conf.ltape.iter().for_each(|item| fmt_symbol(item));
-        // print!(" {} ", conf.dir.bright_green().bold());
-        // conf.rtape.iter().rev().for_each(|item| fmt_symbol(item));
-        // println!();
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use bbc::machine::{Head, Machine};
     use color_eyre::eyre::{Context, ContextCompat};
-    use itertools::repeat_n;
+    use itertools::{repeat_n, Itertools};
     use std::fmt::Write;
 
     use super::*;
@@ -1024,7 +952,6 @@ mod tests {
     fn test_fixed_n(from: String, to: String, skip_pop_x: bool) {
         let from: Configuration = from.parse().with_context(|| from).unwrap();
         let mut to: Configuration = to.parse().with_context(|| to).unwrap();
-
         to.sim_step = 1;
 
         test_conf(&from, &to);
