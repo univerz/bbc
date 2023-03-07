@@ -279,7 +279,6 @@ impl Configuration {
             (Left, [.., Item::D], _) => {
                 let item = self.ltape.pop().unwrap();
                 self.rtape.push(item);
-
                 if self.rtape.ends_with(&block::RIGHT_B) {
                     pop_n(&mut self.rtape, block::RIGHT_B.len());
                     if let Some(Item::E { block: 1, exp }) = self.rtape.last_mut() {
@@ -590,7 +589,7 @@ impl Configuration {
         false
     }
 
-    fn gen_step(&mut self, cfg: Config) -> Result<(), Err> {
+    fn gen_step(&mut self, cfg: &Config) -> Result<(), Err> {
         if self.dir == Direction::Right && (cfg.accel_uni_cycles || cfg.accel_counters) {
             if let Some(counter) = CounterAccel::new(&self.rtape) {
                 if cfg.accel_uni_cycles {
@@ -611,7 +610,7 @@ impl Configuration {
         self.step()
     }
 
-    fn run(&mut self, cfg: Config) -> Result<(), Err> {
+    fn run(&mut self, cfg: &Config) -> Result<(), Err> {
         while self.sim_step < cfg.sim_step_limit {
             let old_a = self.stats.num_a_create;
             let old_c = self.stats.num_c_create;
@@ -811,7 +810,7 @@ fn main() -> Result<()> {
     if args.tui {
         tui(conf, cfg)?;
     } else {
-        let ret = conf.run(cfg);
+        let ret = conf.run(&cfg);
         println!("{conf}");
         dbg!(&ret);
     }
@@ -850,7 +849,7 @@ fn tui(mut conf: Configuration, mut cfg: Config) -> Result<()> {
                 history.push_front((speed, state, conf.clone()));
                 let step = 1 << speed;
                 cfg.sim_step_limit = conf.sim_step + step;
-                state = conf.run(cfg);
+                state = conf.run(&cfg);
                 if history.len() > 1_000_000 {
                     history.pop_back();
                 }
@@ -879,10 +878,35 @@ mod tests {
 
     use super::*;
 
-    // TODO: test compressions
-    // TODO: test final configuration
+    // cargo test translated_cycle --bin no1 --release -- --ignored --nocapture
+    #[ignore] // ~1minute in release mode
+    #[test]
+    fn translated_cycle() {
+        let tc = "0 > x^7639 D x^10347 3 x^7635 D x^10355 3 x^7619 D x^10387 3 x^7555 D x^10515 3 x^7299 D x^11027 3 x^6275 D x^13075 3 x^2179 DD x^7088 3 x^1 3 x^3849 P";
+        let from: Configuration = format!("! {tc}").parse().unwrap();
+        let mut to: Configuration = format!("! a^1 {tc}").parse().unwrap();
+        to.sim_step = 620308;
+        let cfg = Config {
+            sim_step_limit: to.sim_step,
+            print_mod: 63,
+            accel_counters: false,
+            accel_uni_cycles: false,
+            print_only_cycles: false,
+        };
 
-    // cargo test transitions -- --nocapture
+        let end_conf = test_conf(&from, &to, &cfg);
+        assert_eq!(end_conf.stats.num_tm_steps, 8_468_569_863);
+    }
+
+    #[test]
+    fn special_blocks() {
+        test_fixed_n("! 2 x^7640 D x^10345 > 3 !".into(), "! a^1 0 > !".into(), true);
+        test_fixed_n("! a^10 2 x^7640 D x^10345 > 3 !".into(), "! a^11 0 > !".into(), true);
+        test_fixed_n("! D < x^72142 D x^3076 D x^1538 D x^300 D x^30826 !".into(), "! < b^1 !".into(), true);
+        test_fixed_n("! D < x^72142 D x^3076 D x^1538 D x^300 D x^30826 b^10 !".into(), "! < b^11 !".into(), true);
+    }
+
+    // cargo test transitions --bin no1 -- --nocapture
     #[test]
     fn transitions() {
         let lines: Vec<&str> = include_str!("no1.rs")
@@ -953,21 +977,25 @@ mod tests {
         let from: Configuration = from.parse().with_context(|| from).unwrap();
         let mut to: Configuration = to.parse().with_context(|| to).unwrap();
         to.sim_step = 1;
+        let cfg = Config {
+            sim_step_limit: 1,
+            print_mod: 63,
+            accel_counters: true,
+            accel_uni_cycles: true,
+            print_only_cycles: false,
+        };
 
-        test_conf(&from, &to);
+        test_conf(&from, &to, &cfg);
 
         // merge x
         for dir in [Direction::Left, Direction::Right] {
             let (mut from_clone, mut to_clone) = (from.clone(), to.clone());
             let from_tape = if dir == Direction::Left { &mut from_clone.ltape } else { &mut from_clone.rtape };
             let to_tape = if dir == Direction::Left { &mut to_clone.ltape } else { &mut to_clone.rtape };
-            match to_tape.as_mut_slice() {
-                [Item::Unreachable, Item::X(exp @ 1), ..] => {
-                    *exp = 11;
-                    from_tape.insert(1, Item::X(10));
-                    test_conf(&from_clone, &to_clone);
-                }
-                _ => (),
+            if let [Item::Unreachable, Item::X(exp @ 1), ..] = to_tape.as_mut_slice() {
+                *exp = 11;
+                from_tape.insert(1, Item::X(10));
+                test_conf(&from_clone, &to_clone, &cfg);
             }
         }
 
@@ -980,35 +1008,26 @@ mod tests {
             let (mut from_clone, mut to_clone) = (from.clone(), to.clone());
             let from_tape = if dir == Direction::Left { &mut from_clone.ltape } else { &mut from_clone.rtape };
             let to_tape = if dir == Direction::Left { &mut to_clone.ltape } else { &mut to_clone.rtape };
-            match from_tape.as_mut_slice() {
-                [Item::Unreachable, Item::X(exp @ 1), ..] => {
-                    *exp = 11;
-                    to_tape.insert(1, Item::X(10));
-                    test_conf(&from_clone, &to_clone);
-                }
-                _ => (),
+            if let [Item::Unreachable, Item::X(exp @ 1), ..] = from_tape.as_mut_slice() {
+                *exp = 11;
+                to_tape.insert(1, Item::X(10));
+                test_conf(&from_clone, &to_clone, &cfg);
             }
         }
     }
 
-    fn test_conf(from: &Configuration, to: &Configuration) {
+    fn test_conf(from: &Configuration, to: &Configuration, cfg: &Config) -> Configuration {
         println!("\t`{}` -> `{}`", strip_stats_and_steps(from.to_string()), strip_stats_and_steps(to.to_string()));
 
-        let cfg = Config {
-            sim_step_limit: 1,
-            print_mod: 63,
-            accel_counters: true,
-            accel_uni_cycles: true,
-            print_only_cycles: false,
-        };
         let mut conf = from.clone();
         assert_eq!(conf.run(cfg), Err(Err::StepLimit), "conf run failed");
         assert_eq!(
             conf,
             *to,
-            "conf {} -!-> {}",
+            "conf {} -!-> {} // {}",
             strip_stats_and_steps(from.to_string()),
-            strip_stats_and_steps(to.to_string())
+            strip_stats_and_steps(to.to_string()),
+            strip_stats_and_steps(conf.to_string())
         );
         println!("\t\tsim conf ok");
 
@@ -1016,7 +1035,7 @@ mod tests {
         let end: RawConf = to.into();
         let debug = if start.tape.iter().map(|t| t.len()).sum::<usize>() < 100 { true } else { false };
 
-        let valid = start.run(end, 10_000_000, debug);
+        let valid = start.run(end, 100_000_000_000, debug);
         assert!(
             valid,
             "raw conf {} -!-> {}",
@@ -1024,7 +1043,8 @@ mod tests {
             strip_stats_and_steps(to.to_string())
         );
         assert_eq!(conf.stats.num_tm_steps, start.steps);
-        println!("\t\traw conf ok");
+        println!("\t\traw conf ok in {} steps", conf.stats.num_tm_steps);
+        conf
     }
 
     type RawTape = Vec<u8>;
@@ -1145,7 +1165,7 @@ mod tests {
 
     #[test]
     fn parse_conf() -> Result<()> {
-        for inp in ["0:  2 x^3 P a^4 DD x^167 31 x^17 L(432)  >  3 x^70 P", "0: 0 < 1 !"] {
+        for inp in ["2 x^3 P a^4 DD x^167 31 x^17 L(432)  >  3 x^70 P", "0 < 1 !"] {
             let conf: Configuration = inp.parse()?;
             let strip_colors = String::from_utf8(strip_ansi_escapes::strip(conf.to_string())?)?;
             assert_eq!(
