@@ -478,7 +478,7 @@ impl str::FromStr for CPSCertif {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut ret = CPSCertif::default();
         let mut it = s.split_whitespace();
-        if it.next().contains(&"Result") {
+        if it.next() == Some("Result") {
             for direction in [Direction::Left, Direction::Right] {
                 let cnt: usize = it.next().context("invalid edges len")?.parse()?;
                 for _ in 0..cnt {

@@ -1,8 +1,3 @@
-#![feature(core_intrinsics)]
-#![feature(iter_advance_by)]
-#![feature(let_chains)]
-#![feature(option_result_contains)]
-#![feature(stmt_expr_attributes)]
 #![feature(iter_collect_into)]
 
 use std::panic::UnwindSafe;
