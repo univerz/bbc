@@ -1,6 +1,3 @@
-#![feature(result_contains_err)]
-#![feature(option_result_contains)]
-
 use argh::FromArgs;
 use bbc::machine::Direction;
 use color_eyre::eyre::Result;
@@ -103,7 +100,7 @@ struct CounterAccel {
 
 impl CounterAccel {
     fn new(rtape: &[Item]) -> Option<CounterAccel> {
-        if !rtape.first().contains(&&Item::P) {
+        if !rtape.first().is_some_and(|i| *i == Item::P) {
             return None;
         }
 
@@ -785,7 +782,7 @@ struct Config {
     print_only_cycles: bool,
 }
 
-// new run:               cargo run --release --bin no1 60 30
+// new run:               cargo run --release --bin no1 60 20
 // explore configuration: cargo run --release --bin no1 8 0 --conf "2 x^7640 D x^10344 2 x^7640 D x^10344 1 x^7640 D x^10345 3 x^7639 D x^10347 3 < ! "
 // explore in tui:        cargo run --release --bin no1 8 0 --conf "1 > P" --tui
 fn main() -> Result<()> {
@@ -845,7 +842,7 @@ fn tui(mut conf: Configuration, mut cfg: Config) -> Result<()> {
 
         match keys.next().unwrap().unwrap() {
             Key::Char('q') => break,
-            Key::Char('j') if state.is_ok() || state.contains_err(&Err::StepLimit) => {
+            Key::Char('j') if state.is_ok() || state == Err(Err::StepLimit) => {
                 history.push_front((speed, state, conf.clone()));
                 let step = 1 << speed;
                 cfg.sim_step_limit = conf.sim_step + step;

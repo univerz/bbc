@@ -1,5 +1,3 @@
-#![feature(result_contains_err)]
-
 use argh::FromArgs;
 use bbc::machine::{Direction, Head, Machine};
 use bbc::ui_dbg;
@@ -418,7 +416,7 @@ fn tui(mut conf: Configuration, machine: &Machine, blocks: RefBlocks, mut cfg: C
 
         match keys.next().unwrap().unwrap() {
             Key::Char('q') => break,
-            Key::Char('j') if state.is_ok() || state.contains_err(&Err::StepLimit) => {
+            Key::Char('j') if state.is_ok() || state == Err(Err::StepLimit) => {
                 let step = 1 << speed;
                 cfg.sim_step_limit = conf.sim_step + step;
                 state = conf.run(machine, blocks, cfg);
