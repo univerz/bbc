@@ -138,8 +138,8 @@ impl Configuration {
             if symbol == NOT_VISITED_0 {
                 symbol = 0;
             }
-            let trans = machine.get_transition(symbol, self.head.state).ok_or(Err::Halt)?;
-            if trans.head.state >= machine.states() {
+            let trans = machine.get_transition(self.head, symbol).ok_or(Err::Halt)?;
+            if trans.head.state >= machine.states {
                 return Err(Err::Halt);
             }
             self.head = trans.head;
@@ -363,10 +363,8 @@ impl CPS {
 
     pub fn new(machine: &Machine, segment_sizes: SegmentSizes) -> CPS {
         let tape_len: usize = 17.min(segment_sizes.0.iter().max().unwrap() * 3);
-        let step_limit = 10
-            * (machine.states() as usize * machine.symbols() as usize)
-            * (tape_len + 1)
-            * 2usize.pow(tape_len as u32);
+        let step_limit =
+            10 * (machine.states as usize * machine.symbols as usize) * (tape_len + 1) * 2usize.pow(tape_len as u32);
         let mut interner = Interner::new();
         let zeros = Segment::zeros(segment_sizes, &mut interner);
         let mut confs = IndexSet::new();
@@ -383,6 +381,10 @@ impl CPS {
     }
 
     pub fn prove(machine: &Machine, max_segment_size: usize) -> Option<CPS> {
+        // let a = max_segment_size;
+        // Self::prove_size(machine, SegmentSizes([a, a, a])).ok()
+        // (11..=14).find_map(|a| Self::prove_size(machine, SegmentSizes([a, a, a])).ok())
+        // (1..=max_segment_size).find_map(|a| Self::prove_size(machine, SegmentSizes([a, a, a])).ok())
         iproduct!(1..=max_segment_size, 1..=max_segment_size, 1..=max_segment_size)
             .find_map(|(a, b, c)| Self::prove_size(machine, SegmentSizes([a, b, c])).ok())
     }
@@ -459,7 +461,7 @@ impl CPSCertif {
         let (machine, certif) = line.split_once(" ").context("invalid line")?;
         println!("testing: {machine}");
 
-        let machine = Machine::from(machine);
+        let machine: Machine = machine.parse().unwrap();
         let certif: CPSCertif = certif.parse()?;
 
         // let cps = CPS::prove(&machine, max_segment_size);

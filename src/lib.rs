@@ -1,3 +1,4 @@
+#![feature(iter_array_chunks)]
 #![feature(iter_collect_into)]
 
 use std::panic::UnwindSafe;

@@ -2,7 +2,7 @@
 // https://github.com/FransFaase/SymbolicTM
 
 use anyhow::{Context, Result};
-use bbc::machine::{Machine, Transition};
+use bbc::machine::{Direction, Head, Machine, Transition};
 use hashbrown::HashMap;
 use itertools::Itertools;
 
@@ -307,7 +307,7 @@ fn main() -> Result<()> {
 
     let mut lines = std::io::stdin().lines();
 
-    let machine = Machine::from(&lines.next().context("no machine line")??);
+    let machine: Machine = lines.next().context("no machine line")??.parse().unwrap();
     println!("machine: {}", machine.to_string());
 
     let patterns: Vec<Pattern> = lines
@@ -321,7 +321,9 @@ fn main() -> Result<()> {
     let mut matched_from: Matched = HashMap::new();
 
     patterns.iter().enumerate().try_for_each(|(idx, pat)| {
-        let trans = machine.get_transition(pat.symbol, pat.state).context("undefined transition")?;
+        let trans = machine
+            .get_transition(Head { state: pat.state, direction: Direction::Right }, pat.symbol)
+            .context("undefined transition")?;
         println!("\n{idx:<4}{pat} ({trans}):");
 
         let mut pat = pat.clone();

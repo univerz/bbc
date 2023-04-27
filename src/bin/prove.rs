@@ -57,7 +57,7 @@ pub fn do_it<F: Fn(Machine) -> R + RefUnwindSafe + Send + Sync + 'static, R: Int
 
     let t = thread::spawn(move || {
         receiver.into_iter().par_bridge().for_each(|machine_str| {
-            let machine = Machine::from(&machine_str);
+            let machine: Machine = machine_str.parse().unwrap();
             let res = ProverResult::catch(|| f(machine));
             // it's faster to print from one thread
             tx_done.send((res, machine_str)).unwrap();

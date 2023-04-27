@@ -1,7 +1,6 @@
-use itertools::Itertools;
-use std::{convert::TryInto, fmt};
+use std::{fmt, str::FromStr};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, parse_display::Display, parse_display::FromStr)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, parse_display::Display)]
 pub enum Direction {
     #[display("L")]
     Left = 0,
@@ -39,45 +38,47 @@ pub struct Head {
     pub direction: Direction,
 }
 
+impl Head {
+    pub fn new() -> Head {
+        Head { state: 0, direction: Direction::Left }
+    }
+
+    #[inline]
+    fn state_char(&self) -> char {
+        (self.state + b'A') as char
+    }
+}
+
 impl fmt::Display for Head {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.direction == Direction::Left {
-            write!(f, "<{}", (self.state + b'A') as char)
+            write!(f, "<{}", self.state_char())
         } else {
-            write!(f, "{}>", (self.state + b'A') as char)
+            write!(f, "{}>", self.state_char())
         }
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Transition {
     pub symbol: u8,
     pub head: Head,
 }
 
 impl Transition {
-    pub fn define() -> Transition {
-        Transition { symbol: 0, head: Head { state: 0, direction: Direction::Left } } // 0LA
-    }
-
     pub fn first() -> Transition {
-        Transition { symbol: 1, head: Head { state: 1, direction: Direction::Right } } // 1RB
+        Transition { symbol: 1, head: Head { state: b'B' - b'A', direction: Direction::Right } } // 1RB
     }
 
+    #[inline]
     pub fn last() -> Transition {
-        Transition { symbol: 1, head: Head { state: 25, direction: Direction::Right } } // 1RZ
+        Transition { symbol: 1, head: Head { state: b'Z' - b'A', direction: Direction::Right } } // 1RZ
     }
 }
 
 impl fmt::Display for Transition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}",
-            (self.symbol + b'0') as char,
-            if self.head.direction == Direction::Left { 'L' } else { 'R' },
-            (self.head.state + b'A') as char
-        )
+        write!(f, "{}{}{}", (self.symbol + b'0') as char, self.head.direction, self.head.state_char())
     }
 }
 
@@ -87,68 +88,85 @@ impl fmt::Debug for Transition {
     }
 }
 
-// TODO: benchmark that version with dynamic symbol count
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Machine {
-    machine: Vec<[Option<Transition>; 2]>,
+    machine: Vec<Option<Transition>>,
+    pub states: u8,
+    pub symbols: u8,
 }
 
 impl Machine {
+    pub fn first(states: u8, symbols: u8) -> Machine {
+        let mut machine = vec![None; (states * symbols) as usize];
+        machine[0] = Some(Transition::first());
+        Machine { machine, states, symbols }
+    }
+
     #[inline]
-    pub fn get_transition(&self, symbol: u8, state: u8) -> Option<Transition> {
-        self.machine[state as usize][symbol as usize]
+    fn idx(&self, state: u8, symbol: u8) -> usize {
+        (state * self.symbols + symbol) as usize
     }
 
-    pub fn from(machine: &str) -> Machine {
-        fn trans(trans: &[u8]) -> Option<Transition> {
-            let [mut symbol, mut direction, mut state]: [u8; 3] = trans.try_into().unwrap();
-            match symbol as char {
-                'A'..='Z' => (state, symbol, direction) = (symbol, direction, state), // marxen's format B1R -> 1RB
-                '-' => return None,
-                _ => (),
-            }
-            Some(Transition {
-                symbol: symbol - b'0',
-                head: Head {
-                    direction: if direction == b'L' { Direction::Left } else { Direction::Right },
-                    state: state - b'A',
-                },
+    #[inline]
+    pub fn get_transition(&self, head: Head, symbol: u8) -> Option<Transition> {
+        self.machine[self.idx(head.state, symbol)]
+    }
+}
+
+impl FromStr for Machine {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut states = 1;
+        let it = s.trim().as_bytes().into_iter().map(|b| *b);
+        let machine: Vec<_> = it
+            .filter(|&b| {
+                if b == b'_' {
+                    states += 1;
+                    false
+                } else {
+                    true
+                }
             })
-        }
+            .array_chunks()
+            .map(|[symbol, direction, state]| {
+                (symbol != b'-').then(|| {
+                    let direction = if direction == b'L' { Direction::Left } else { Direction::Right };
+                    Transition { symbol: symbol - b'0', head: Head { direction, state: state - b'A' } }
+                })
+            })
+            .collect();
+        let symbols = machine.len() as u8 / states;
+        assert_eq!((states * symbols) as usize, machine.len());
 
-        let machine = machine.trim();
-        let it: Box<dyn Iterator<Item = &[u8]>> = if machine.contains("_") {
-            // new format
-            Box::new(machine.split("_").map(|row| row.as_bytes().chunks(3)).flatten())
-        } else if machine.contains(" ") {
-            // classic & ligocki double space
-            Box::new(machine.split_whitespace().map(str::as_bytes))
-        } else {
-            // compact bbchallenge.org
-            Box::new(machine.as_bytes().chunks(3))
-        };
-
-        Machine { machine: it.map(trans).tuples().map(|(s0, s1)| [s0, s1]).collect() }
-    }
-
-    #[inline(always)]
-    pub fn states(&self) -> u8 {
-        self.machine.len() as u8
-    }
-
-    #[inline(always)]
-    pub fn symbols(&self) -> u8 {
-        2
+        Ok(Machine { machine, symbols, states })
     }
 }
 
 impl fmt::Display for Machine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.machine.iter().enumerate().try_for_each(|(idx, state)| {
-            if idx != 0 {
+        let mut delim = 0;
+        self.machine.iter().try_for_each(|t| {
+            if delim == self.symbols {
                 write!(f, "_")?;
+                delim = 0;
             }
-            state.iter().try_for_each(|t| t.map(|t| write!(f, "{}", t)).unwrap_or_else(|| write!(f, "---")))
+            delim += 1;
+            t.map(|t| write!(f, "{}", t)).unwrap_or_else(|| write!(f, "---"))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn machine() {
+        let data = [" 1RB1LC_1RC1RB_1RD0LE_1LA1LD_1RZ0LA", "1RB2LA1RA2LB2LA_0LA2RB3RB4RA1RH ", "1RB2LB1RH_2LA2RB1LB"];
+        for s in data {
+            let m: Machine = s.parse().unwrap();
+            assert_eq!(s.trim(), &m.to_string());
+        }
     }
 }

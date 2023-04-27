@@ -36,7 +36,7 @@ struct CPS {
 
 fn main() -> Result<()> {
     let args: Args = argh::from_env();
-    let machine = Machine::from(&args.machine);
+    let machine: Machine = args.machine.parse().unwrap();
     match args.cmd {
         SubCommand::CPS(cps) => {
             let ret = if !cps.segment_sizes.0.contains(&0) {
