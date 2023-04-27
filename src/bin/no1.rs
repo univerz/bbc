@@ -1054,7 +1054,7 @@ mod tests {
 
     impl RawConf {
         fn run(&mut self, end: RawConf, steps_limit: Exp, debug: bool) -> bool {
-            let machine = Machine::from("1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC");
+            let machine: Machine = "1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC".parse().unwrap();
             if debug {
                 println!("\t   ->   {end}");
             }
@@ -1077,7 +1077,7 @@ mod tests {
 
                 let symbol = self.tape[self.head.direction.idx()].pop().unwrap_or(0);
                 assert_ne!(symbol, u8::MAX, "reached unreachable symbol `!`");
-                let trans = machine.get_transition(symbol, self.head.state).unwrap();
+                let trans = machine.get_transition(self.head, symbol).unwrap();
                 self.head = trans.head;
                 self.tape[self.head.direction.opp_idx()].push(trans.symbol);
 

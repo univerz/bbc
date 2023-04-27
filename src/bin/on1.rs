@@ -222,7 +222,7 @@ impl Configuration {
         while self.sim_step < cfg.sim_step_limit {
             if !self.leap(blocks)? {
                 let symbol = Self::pop_symbol(&mut self.tape[self.head.direction.idx()], blocks)?;
-                let trans = machine.get_transition(symbol, self.head.state).ok_or(Err::Halt)?;
+                let trans = machine.get_transition(self.head, symbol).ok_or(Err::Halt)?;
                 self.head = trans.head;
                 Self::push_symbol(trans.symbol, &mut self.tape[self.head.direction.opp_idx()], blocks)?;
             }
@@ -360,7 +360,7 @@ fn main() -> Result<()> {
 
     // return transcode();
 
-    let machine = Machine::from("1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC");
+    let machine: Machine = "1RB1RD_1LC0RC_1RA1LD_0RE0LB_---1RC".parse().unwrap();
     let args: Args = argh::from_env();
     let cfg = Config { sim_step_limit: 2usize.checked_pow(args.sim_step_limit).unwrap(), print_mod: args.print_mod };
     let mut conf = args.conf;
