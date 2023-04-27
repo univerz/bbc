@@ -4,29 +4,34 @@ version = "0.1.0"
 authors = ["univerz <univerz@fu-solution.com>"]
 license = "MIT OR Apache-2.0"
 publish = false
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1"
-ahash = "0.6.3" # 0.7.0 looks slower (reworked specialization) # TODO(perf) test this old note + hashbrown & cargo up
+ahash = "0.8"
 argh = "0.1"
-hashbrown = { version = "0.9.1"}#, default-features = false, features = ["ahash", "ahash-compile-time-rng", "serde"] }
+color-eyre = "0.6"
+crossbeam-channel = "0.5"
+derivative = "2.2"
+hashbrown = "0.13"
 indexmap = "1.9"
-itertools = "0.10.0"
-jemallocator = "0.3.2"
-once_cell = "1.4.1"
-parse-display = "0.5.5"
+itertools = "0.10"
+jemallocator = "0.5"
+once_cell = "1.4"
+owo-colors = "3.5"
+parse-display = "0.8"
 peg = "0.8.0"
 pretty_assertions = "1.3"
 rayon = "1.5"
+strip-ansi-escapes = "0.1"
+termion = "2.0"
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.4"
 
 [profile.release]
 codegen-units = 1
 lto = true
-#lto = "fat" -- nie je to jednoznacne lepsie
 debug = 1
 
 [profile.dev]
@@ -35,8 +40,9 @@ debug = 1
 
 [profile.dev.package."*"]
 opt-level = 3
-debug = 1
 
+[profile.dev.build-override]
+opt-level = 3
 
 [features]
 # default = ["ui_tui"] # enable this to debug changes in printing
