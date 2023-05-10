@@ -27,7 +27,7 @@ enum SubCommand {
 struct CPS {
     /// max segment size
     #[argh(positional)]
-    pub max_segment_size: usize,
+    pub max_segment_size: u8,
 }
 
 fn main() -> Result<()> {
@@ -41,7 +41,8 @@ fn main() -> Result<()> {
 
     let ret = match args.cmd {
         SubCommand::CPS(cps) => {
-            do_it(receiver, move |machine| bbc::skelet_cps::CPS::prove(&machine, cps.max_segment_size))?
+            let segment_space = bbc::skelet_cps::size2space(cps.max_segment_size);
+            do_it(receiver, move |machine| bbc::skelet_cps::CPS::prove(&machine, &segment_space))?
         }
     };
 

@@ -24,6 +24,9 @@ pub enum Err {
     ConfLimit,
 }
 
+const FAST_MODE: bool = false;
+// const FAST_MODE: bool = true;
+
 const NOT_VISITED_0: u8 = u8::MAX;
 // const NOT_VISITED_0: u8 = 0;
 
@@ -59,8 +62,10 @@ struct Segment {
 
 impl Segment {
     pub fn zeros(sizes: SegmentSizes, interner: &mut Interner) -> Segments {
-        let mut segment =
-            |mode| Segment { itape: interner.get_or_insert(&vec![NOT_VISITED_0; sizes.0[mode]]), mode: mode as u8 };
+        let mut segment = |mode| Segment {
+            itape: interner.get_or_insert(&vec![NOT_VISITED_0; sizes.0[mode] as usize]),
+            mode: mode as u8,
+        };
         [segment(0), segment(1), segment(2)]
     }
 
@@ -85,7 +90,7 @@ impl Display2<Direction, &Interner> for Segment {
 type Segments = [Segment; 3];
 /// 0 == left, 1 == right, 2 == middle
 #[derive(Clone, Copy, Debug)]
-pub struct SegmentSizes(pub [usize; 3]);
+pub struct SegmentSizes(pub [u8; 3]);
 
 impl fmt::Display for SegmentSizes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -102,12 +107,27 @@ impl FromStr for SegmentSizes {
         };
         let separator = if s.contains(',') { ',' } else { '-' };
         s.split(separator)
-            .map(|i| i.parse::<usize>())
+            .map(|i| i.parse::<u8>())
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| err())?
             .try_into()
             .map(|s| SegmentSizes(s))
             .map_err(|_| err())
+    }
+}
+
+type SegmentSpace<'a> = &'a [SegmentSizes];
+
+pub fn size2space(max_segment_size: u8) -> Vec<SegmentSizes> {
+    // let a = max_segment_size; vec![SegmentSizes([a, a, a])]
+    // (11..=14).map(|a| SegmentSizes([a, a, a])).collect()
+    if FAST_MODE {
+        (1..=max_segment_size).map(|a| SegmentSizes([a, a, a])).collect()
+    } else {
+        iproduct!(1..=max_segment_size, 1..=max_segment_size, 1..=max_segment_size)
+            .map(|(a, b, c)| SegmentSizes([a, b, c]))
+            .sorted_by_key(|s| s.0[0] + s.0[1] + s.0[2])
+            .collect()
     }
 }
 
@@ -282,7 +302,11 @@ impl CPS {
     pub fn run(&mut self, machine: &Machine) -> Result<(), Err> {
         let CPS { conts, confs, segment_sizes: _, step_limit, interner, _conf2end } = self;
         let step_limit = *step_limit;
-        let mut total_step_limit = 10 * step_limit; // 274x 1RB---_1RC1RA_0RD0RB_1LE1RD_1LF0LE_0RB0RE
+        let mut total_step_limit = if FAST_MODE {
+            100 * step_limit
+        } else {
+            10 * step_limit // 274x 1RB---_1RC1RA_0RD0RB_1LE1RD_1LF0LE_0RB0RE 
+        };
 
         let mut conf_id = 0;
         while let Some(old_conf) = confs.get_index(conf_id) {
@@ -362,9 +386,14 @@ impl CPS {
     }
 
     pub fn new(machine: &Machine, segment_sizes: SegmentSizes) -> CPS {
-        let tape_len: usize = 17.min(segment_sizes.0.iter().max().unwrap() * 3);
-        let step_limit =
-            10 * (machine.states as usize * machine.symbols as usize) * (tape_len + 1) * 2usize.pow(tape_len as u32);
+        let step_limit = if FAST_MODE {
+            let tape_len: usize = *segment_sizes.0.iter().max().unwrap() as usize * 3 + 5;
+            10 * (machine.states as usize * machine.symbols as usize) * tape_len
+        } else {
+            let tape_len: usize = 17.min(*segment_sizes.0.iter().max().unwrap() as usize * 3);
+            10 * (machine.states as usize * machine.symbols as usize) * (tape_len + 1) * 2usize.pow(tape_len as u32)
+        };
+
         let mut interner = Interner::new();
         let zeros = Segment::zeros(segment_sizes, &mut interner);
         let mut confs = IndexSet::new();
@@ -380,13 +409,8 @@ impl CPS {
         Ok(cps)
     }
 
-    pub fn prove(machine: &Machine, max_segment_size: usize) -> Option<CPS> {
-        // let a = max_segment_size;
-        // Self::prove_size(machine, SegmentSizes([a, a, a])).ok()
-        // (11..=14).find_map(|a| Self::prove_size(machine, SegmentSizes([a, a, a])).ok())
-        // (1..=max_segment_size).find_map(|a| Self::prove_size(machine, SegmentSizes([a, a, a])).ok())
-        iproduct!(1..=max_segment_size, 1..=max_segment_size, 1..=max_segment_size)
-            .find_map(|(a, b, c)| Self::prove_size(machine, SegmentSizes([a, b, c])).ok())
+    pub fn prove(machine: &Machine, segment_space: SegmentSpace) -> Option<CPS> {
+        segment_space.iter().find_map(|sizes| Self::prove_size(machine, *sizes).ok())
     }
 }
 
@@ -457,15 +481,14 @@ impl CPSCertif {
         ret
     }
 
-    pub fn validate(line: &str, max_segment_size: usize) -> Result<()> {
+    pub fn validate(line: &str, segment_space: SegmentSpace) -> Result<()> {
         let (machine, certif) = line.split_once(" ").context("invalid line")?;
         println!("testing: {machine}");
 
         let machine: Machine = machine.parse().unwrap();
         let certif: CPSCertif = certif.parse()?;
 
-        // let cps = CPS::prove(&machine, max_segment_size);
-        let cps = CPS::prove(&machine, max_segment_size);
+        let cps = CPS::prove(&machine, segment_space);
         // cps.as_ref().map(|cps| println!("{cps}"));
         let my_certif = CPSCertif::from_cps(cps);
 

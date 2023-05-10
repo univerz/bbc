@@ -21,16 +21,15 @@ enum SubCommand {
 struct CPS {
     /// max segment size
     #[argh(positional)]
-    pub max_segment_size: usize,
+    pub max_segment_size: u8,
 }
 
 fn main() -> Result<()> {
     let args: Args = argh::from_env();
     match args.cmd {
         SubCommand::CPS(cps) => {
-            io::stdin()
-                .lines()
-                .try_for_each(|line| bbc::skelet_cps::CPSCertif::validate(&line?, cps.max_segment_size))?;
+            let segment_space = &bbc::skelet_cps::size2space(cps.max_segment_size);
+            io::stdin().lines().try_for_each(|line| bbc::skelet_cps::CPSCertif::validate(&line?, segment_space))?;
         }
     }
     Ok(())

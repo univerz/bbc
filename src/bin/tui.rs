@@ -31,7 +31,7 @@ struct CPS {
     pub segment_sizes: bbc::skelet_cps::SegmentSizes,
     /// max segment size
     #[argh(option, default = "20")]
-    pub max_segment_size: usize,
+    pub max_segment_size: u8,
 }
 
 fn main() -> Result<()> {
@@ -42,7 +42,8 @@ fn main() -> Result<()> {
             let ret = if !cps.segment_sizes.0.contains(&0) {
                 bbc::skelet_cps::CPS::prove_size(&machine, cps.segment_sizes).map_err(|e| anyhow!("{e:?}"))
             } else {
-                bbc::skelet_cps::CPS::prove(&machine, cps.max_segment_size).ok_or_else(|| anyhow!("undecided"))
+                let segment_space = bbc::skelet_cps::size2space(cps.max_segment_size);
+                bbc::skelet_cps::CPS::prove(&machine, &segment_space).ok_or_else(|| anyhow!("undecided"))
             }?;
             println!("{ret}");
         }
