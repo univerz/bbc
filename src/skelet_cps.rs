@@ -1,7 +1,7 @@
 // reimplementation of reimplementation of skelet's implementation :) https://gist.github.com/savask/1c43a0e5cdd81229f236dcf2b0611c3f
 
 use anyhow::{Context, Result};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use indexmap::IndexSet;
 use itertools::{iproduct, Itertools};
 use std::{
@@ -27,6 +27,8 @@ pub enum Err {
 const FAST_MODE: bool = false;
 // const FAST_MODE: bool = true;
 
+const RUN_OLD_IMPL: bool = false;
+
 const NOT_VISITED_0: u8 = u8::MAX;
 // const NOT_VISITED_0: u8 = 0;
 
@@ -45,7 +47,19 @@ fn symbol2char(i: &u8) -> char {
     if *i == u8::MAX { '.' } else { (i + b'0') as char }
 }
 
-fn format_conf(tape: &[Vec<u8>; 2], head: Head) -> String {
+fn format_conf(tape: &[u8], mut pos: usize, head: Head) -> String {
+    if head.direction == Direction::Right {
+        pos -= 1;
+    }
+    format!(
+        "{}{}{}",
+        tape[..pos].iter().map(symbol2char).collect::<String>(),
+        head,
+        tape[pos..].iter().map(symbol2char).collect::<String>(),
+    )
+}
+
+fn format_conf_old(tape: &[Vec<u8>; 2], head: Head) -> String {
     format!(
         "{}{}{}",
         tape[0].iter().map(symbol2char).collect::<String>(),
@@ -81,7 +95,10 @@ impl Segment {
 }
 
 impl Display2<Direction, &Interner> for Segment {
-    fn fmt(&self, direction: Direction, interner: &Interner, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, mut direction: Direction, interner: &Interner, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !RUN_OLD_IMPL {
+            direction = Direction::Left; // always left2right
+        }
         write!(f, "{}, {}", self.itape.dsp(direction, interner), self.compat_mode())
     }
 }
@@ -147,12 +164,93 @@ impl Configuration {
     fn run(
         mut self,
         machine: &Machine,
-        mut step_limit: usize,
+        total_step_limit: &mut usize,
+        local_limit: usize,
         interner: &mut Interner,
-    ) -> Result<(Configuration, Segment, String, usize), Err> {
+    ) -> Result<Option<(Configuration, Segment, String)>, Err> {
+        if RUN_OLD_IMPL {
+            return self.run_old(machine, total_step_limit, local_limit, interner);
+        }
+
+        let mut tape: Vec<u8> = Vec::new();
+        let mut pos = usize::MAX;
+        tape.extend_from_slice(&interner[self.tape[0].itape]);
+        if self.head.direction == Direction::Left {
+            pos = tape.len() - 1; // 0< 2 1
+        }
+        tape.extend_from_slice(&interner[self.tape[2].itape]);
+        if pos == usize::MAX {
+            pos = tape.len(); // 0 2 >1 
+        }
+        tape.extend_from_slice(&interner[self.tape[1].itape]);
+        let mut history: HashSet<Vec<u8>> = HashSet::new();
+
+        loop {
+            let mut symbol = tape[pos];
+            if symbol == NOT_VISITED_0 {
+                symbol = 0;
+            }
+            let trans = machine.get_transition(self.head, symbol).ok_or(Err::Halt)?;
+            if trans.head.state >= machine.states {
+                return Err(Err::Halt);
+            }
+            self.head = trans.head;
+            tape[pos] = trans.symbol;
+
+            pos += 2 * self.head.direction as usize;
+            ui_dbg!("\t\t{}", format_conf(&tape, pos, self.head)); // think before moving this
+            if pos == 0 || pos > tape.len() {
+                break;
+            }
+            pos -= 1;
+
+            let mut new_tape = tape.clone();
+            // `symbols + 1` because of NOT_VISITED_0 == u8::MAX symbol (overflow)
+            new_tape[pos] += (machine.symbols + 1) * (self.head.state + 1);
+            // ui_dbg!("\t\t{} {} {} {:?}", tape.iter().map(symbol2char).collect::<String>(), self.head, pos, new_tape);
+            let new = history.insert(new_tape);
+            if !new {
+                ui_dbg!("\t\t\tcycle");
+                return Ok(None);
+            }
+
+            *total_step_limit -= 1;
+            if *total_step_limit == local_limit {
+                return Err(Err::StepLimit);
+            }
+        }
+        let s = if cfg!(not(feature = "ui_tui")) { String::new() } else { format_conf(&tape, pos, self.head) };
+
+        let initial_segments = self.tape;
+        let dir = self.head.direction;
+        let mut end_tape = tape.as_slice();
+        // init:                   0 2 1                         0    2 1
+        // end:  (dir.idx == 0)  < 2 1 0out || (dir.idx() == 1)  1out 0 2 >
+        let it = if dir == Direction::Left { [(2, 0), (1, 2), (0, 1)] } else { [(1, 0), (0, 2), (2, 1)] };
+        it.into_iter().for_each(|(eidx, iidx)| {
+            let initial_segment = initial_segments[iidx];
+            let (tape, new_end_tape) = end_tape.split_at(initial_segment.itape.len());
+            end_tape = new_end_tape;
+            self.tape[eidx] = Segment { itape: interner.get_or_insert(tape), mode: initial_segment.mode }
+        });
+        let mut out_segment = Segment::empty();
+        std::mem::swap(&mut out_segment, &mut self.tape[dir.idx()]);
+
+        Ok(Some((self, out_segment, s)))
+    }
+
+    #[allow(unused)]
+    fn run_old(
+        mut self,
+        machine: &Machine,
+        total_step_limit: &mut usize,
+        local_limit: usize,
+        interner: &mut Interner,
+    ) -> Result<Option<(Configuration, Segment, String)>, Err> {
         // TODO(perf): switch to single tape?
         let mut tape = [interner[self.tape[0].itape].to_vec(), interner[self.tape[1].itape].to_vec()];
         tape[self.head.direction.opp_idx()].extend_from_slice(&interner[self.tape[2].itape]);
+        // let mut history: HashSet<(ITape, ITape, Head)> = HashSet::new();
 
         while let Some(mut symbol) = tape[self.head.direction.idx()].pop() {
             if symbol == NOT_VISITED_0 {
@@ -164,13 +262,20 @@ impl Configuration {
             }
             self.head = trans.head;
             tape[self.head.direction.opp_idx()].push(trans.symbol);
-            ui_dbg!("\t\t{}", format_conf(&tape, self.head));
-            step_limit -= 1;
-            if step_limit == 0 {
+            ui_dbg!("\t\t{}", format_conf_old(&tape, self.head));
+
+            // let new = history.insert((interner.get_or_insert(&tape[0]), interner.get_or_insert(&tape[1]), self.head));
+            // if !new {
+            //     ui_dbg!("\t\t\tcycle");
+            //     return Ok(None);
+            // }
+
+            *total_step_limit -= 1;
+            if *total_step_limit == local_limit {
                 return Err(Err::StepLimit);
             }
         }
-        let s = if cfg!(not(feature = "ui_tui")) { String::new() } else { format_conf(&tape, self.head) };
+        let s = if cfg!(not(feature = "ui_tui")) { String::new() } else { format_conf_old(&tape, self.head) };
         // `[] <S AB C`, last item on tape is closest to head
 
         // end tape \       |   0 2 1    // start idxs; ? == empty; x == last segment out
@@ -197,13 +302,18 @@ impl Configuration {
         self.tape[2] = pop(dir.idx());
         self.tape[dir.idx()] = Segment::empty();
 
-        Ok((self, out_segment, s, step_limit))
+        Ok(Some((self, out_segment, s)))
     }
 }
 
 impl Display1<&Interner> for Configuration {
     fn fmt(&self, interner: &Interner, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tape = |idx, direction| self.tape[idx as usize].itape.dsp(direction, interner);
+        let tape = |idx, mut direction| {
+            if !RUN_OLD_IMPL {
+                direction = Direction::Left;
+            }
+            self.tape[idx as usize].itape.dsp(direction, interner)
+        };
         if self.head.direction == Direction::Left {
             write!(
                 f,
@@ -312,11 +422,11 @@ impl CPS {
         while let Some(old_conf) = confs.get_index(conf_id) {
             ui_dbg!("running conf id={conf_id} {}", old_conf.dsp(interner));
             // `<S ABC` -> `<S AB` + `C`
-            let (conf, c, _last_conf, unused_steps) = old_conf.run(machine, step_limit, interner)?;
-            total_step_limit = total_step_limit.saturating_sub(step_limit - unused_steps);
-            if total_step_limit == 0 {
-                return Err(Err::TotalStepLimit);
-            }
+            let local_limit = total_step_limit.saturating_sub(step_limit);
+            let Some((conf, c, _last_conf)) = old_conf.run(machine, &mut total_step_limit, local_limit, interner)? else {
+                conf_id += 1;
+                continue; // cycle -> we can skip this configuration
+            };
 
             let dir = conf.head.direction;
             #[cfg(feature = "ui_tui")]
@@ -428,14 +538,18 @@ impl fmt::Display for CPS {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (label, direction) in [("Left", Direction::Left), ("Right", Direction::Right)] {
             writeln!(f, "\n* {label} continuations:")?;
-            self.conts.iter().filter(|((o, _), _)| *o == direction.idx()).try_for_each(|((_, from), cont)| {
-                writeln!(
-                    f,
-                    "\t{} --> {}",
-                    from.dsp(direction, &self.interner),
-                    cont.to.iter().map(|to| to.dsp(direction, &self.interner)).join(", ")
-                )
-            })?;
+            self.conts
+                .iter()
+                .filter(|((o, _), _)| *o == direction.idx())
+                .sorted_by_key(|((_, from), _)| from.dsp(direction, &self.interner).to_string())
+                .try_for_each(|((_, from), cont)| {
+                    writeln!(
+                        f,
+                        "\t{} --> {}",
+                        from.dsp(direction, &self.interner),
+                        cont.to.iter().map(|to| to.dsp(direction, &self.interner)).join(", ")
+                    )
+                })?;
         }
         writeln!(f, "\n* Transitions:")?;
         #[cfg(feature = "ui_tui")]
