@@ -2,7 +2,7 @@
 // https://github.com/FransFaase/SymbolicTM
 
 use anyhow::{Context, Result};
-use bbc::machine::{Machine, Transition};
+use bbc::machine::{Direction, Head, Machine, Transition};
 use hashbrown::HashMap;
 use itertools::Itertools;
 
@@ -26,7 +26,7 @@ pub enum Item {
 impl Item {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>, orient: usize) -> std::fmt::Result {
         match self {
-            Item::Symbol(s) => write!(f, "{}", (s + '0' as u8) as char),
+            Item::Symbol(s) => write!(f, "{}", (s + b'0') as char),
             Item::Any => write!(f, "."),
             Item::Rep(tape, rep) => {
                 if tape.len() > 1 {
@@ -67,9 +67,9 @@ pub struct Pattern {
 
 impl std::fmt::Display for Pattern {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: ", (self.state + 'A' as u8) as char)?;
+        write!(f, "{}: ", (self.state + b'A') as char)?;
         fmt_tape(&self.tape[0], f, 0)?;
-        write!(f, "  {}  ", (self.symbol + '0' as u8) as char)?;
+        write!(f, "  {}  ", (self.symbol + b'0') as char)?;
         fmt_tape(&self.tape[1], f, 1)
     }
 }
@@ -103,7 +103,7 @@ peg::parser! {
 
         pub rule pattern() -> Pattern
             = state:(['A'..='Z']) ":" whitespace() left:tape(0) whitespace() s:symbol() whitespace() right:tape(1) {
-                Pattern { state: state as u8 - 'A' as u8, symbol: s, tape: [left, right] }
+                Pattern { state: state as u8 - b'A', symbol: s, tape: [left, right] }
             }
     }
 }
@@ -243,7 +243,7 @@ fn explore(
     matched_from: &mut Matched,
     mut orig_pat_len: Option<usize>,
 ) -> Result<bool> {
-    let tidx = trans.head.orient as usize;
+    let tidx = trans.head.direction.idx();
     loop {
         // println!("{i} {orig_pat_len:?} {}", P(&pat.tape[tidx]));
         match pat.tape[tidx].last_mut().context("empty tape")? {
@@ -307,7 +307,7 @@ fn main() -> Result<()> {
 
     let mut lines = std::io::stdin().lines();
 
-    let machine = Machine::from(&lines.next().context("no machine line")??);
+    let machine: Machine = lines.next().context("no machine line")??.parse().unwrap();
     println!("machine: {}", machine.to_string());
 
     let patterns: Vec<Pattern> = lines
@@ -321,12 +321,14 @@ fn main() -> Result<()> {
     let mut matched_from: Matched = HashMap::new();
 
     patterns.iter().enumerate().try_for_each(|(idx, pat)| {
-        let trans = machine.get_transition(pat.symbol, pat.state).context("undefined transition")?;
+        let trans = machine
+            .get_transition(Head { state: pat.state, direction: Direction::Right }, pat.symbol)
+            .context("undefined transition")?;
         println!("\n{idx:<4}{pat} ({trans}):");
 
         let mut pat = pat.clone();
         pat.state = trans.head.state;
-        pat.tape[1 - trans.head.orient as usize].push(Item::Symbol(trans.symbol));
+        pat.tape[trans.head.direction.opp_idx()].push(Item::Symbol(trans.symbol));
         if !explore(pat, trans, &patterns, &mut matched_from, None)? {
             // println!("\t!!! NOT MATCHED !!!")
         }
