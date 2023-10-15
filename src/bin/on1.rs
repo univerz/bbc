@@ -446,7 +446,7 @@ fn transcode() -> Result<()> {
     let lines = BufReader::new(file).lines();
 
     for line in lines {
-        let line = String::from_utf8(strip_ansi_escapes::strip(line?)?)?;
+        let line = String::from_utf8(strip_ansi_escapes::strip(line?))?;
         // dbg!(&line);
         let conf: Configuration = line.parse()?;
         // dbg!(&conf);
@@ -502,7 +502,7 @@ mod tests {
             let conf: Configuration = inp.parse()?;
             assert_eq!(
                 inp.split_whitespace().collect::<String>(),
-                String::from_utf8(strip_ansi_escapes::strip(conf.to_string())?)?.split_whitespace().collect::<String>()
+                String::from_utf8(strip_ansi_escapes::strip(conf.to_string()))?.split_whitespace().collect::<String>()
             );
         }
         Ok(())

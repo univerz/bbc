@@ -1157,14 +1157,14 @@ mod tests {
     }
 
     fn block2str(block: &[Item]) -> String {
-        String::from_utf8(strip_ansi_escapes::strip(block.iter().join("")).unwrap()).unwrap()
+        String::from_utf8(strip_ansi_escapes::strip(block.iter().join(""))).unwrap()
     }
 
     #[test]
     fn parse_conf() -> Result<()> {
         for inp in ["2 x^3 P a^4 DD x^167 31 x^17 L(432)  >  3 x^70 P", "0 < 1 !"] {
             let conf: Configuration = inp.parse()?;
-            let strip_colors = String::from_utf8(strip_ansi_escapes::strip(conf.to_string())?)?;
+            let strip_colors = String::from_utf8(strip_ansi_escapes::strip(conf.to_string()))?;
             assert_eq!(
                 inp.split_whitespace().collect::<String>(),
                 strip_stats_and_steps(strip_colors).split_whitespace().collect::<String>()
