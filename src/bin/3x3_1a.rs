@@ -1,6 +1,5 @@
 use argh::FromArgs;
 use bbc::machine::{Direction, Head, Machine};
-use bbc::ui_dbg;
 use color_eyre::eyre::Result;
 use derivative::Derivative;
 use owo_colors::OwoColorize;
@@ -101,117 +100,60 @@ impl Configuration {
         Ok(())
     }
 
-    fn leap(&mut self, blocks: RefBlocks) -> Result<bool, Err> {
-        return Ok(false);
+    fn leap(&mut self, _blocks: RefBlocks) -> Result<bool, Err> {
+        // return Ok(false);
+        //
         let [ltape, rtape] = &mut self.tape;
-        // stops before new block compression `01 a^61652 10 E>  d^11104  a^85609885 10`
-        // if self.head.state != 0 && self.head.direction == Direction::Right {
-        //     if let Some(Item::Exp { block: 3, exp: _, visited: _ }) = rtape.last().copied() {
-        //         return true;
-        //     }
-        // }
 
-        if self.head.state == 0 && self.head.direction == Direction::Right {
-            // right tape endgame  `A> a^a 1010 a^b 11` & `a, b % 2 == 0` -> `<C 10 a^(a-2) 1010 a^(b+4) 11` // --conf "!  A> a^4 1010 a^2 11"
-            if let [
-                Item::S(1),
-                Item::S(1),
-                Item::Exp { block: 0, exp: exp_b, visited: _ },
-                Item::S(0),
-                Item::S(1),
-                Item::S(0),
-                Item::S(1),
-                Item::Exp { block: 0, exp: exp_a, visited: _ },
-            ] = rtape.as_mut_slice()
-            {
-                if *exp_a >= 4 && *exp_a % 2 == 0 && *exp_b % 2 == 0 {
-                    self.head.state = 2;
-                    self.head.direction = Direction::Left;
-                    *exp_a -= 2;
-                    *exp_b = exp_b.checked_add(4).unwrap();
-                    rtape.push(Item::S(0));
-                    rtape.push(Item::S(1));
-                    return Ok(true);
-                }
-            }
-            // right tape endgame  `A> a^a 1010 a^b 10 ^c 11` & `a, c % 2 == 0, b % 2 == 1` -> `<C 10 a^(a-2) 1010 a^(b+4) 10 a^c 11` // --conf "!  A> a^4 1010 a^1 10 a^2 11"
-            if let [
-                Item::S(1),
-                Item::S(1),
-                Item::Exp { block: 0, exp: exp_c, visited: _ },
-                Item::S(0),
-                Item::S(1),
-                Item::Exp { block: 0, exp: exp_b, visited: _ },
-                Item::S(0),
-                Item::S(1),
-                Item::S(0),
-                Item::S(1),
-                Item::Exp { block: 0, exp: exp_a, visited: _ },
-            ] = rtape.as_mut_slice()
-            {
-                if *exp_a >= 4 && *exp_a % 2 == 0 && *exp_b % 2 == 1 && *exp_c % 2 == 0 {
-                    self.head.state = 2;
-                    self.head.direction = Direction::Left;
-                    *exp_a -= 2;
-                    *exp_b = exp_b.checked_add(4).unwrap();
-                    rtape.push(Item::S(0));
-                    rtape.push(Item::S(1));
-                    return Ok(true);
-                }
-            }
+        use Item::*;
 
-            // A> a^2n -> a^2n A> || A> a^2n+1 -> a^2n+1 B> || A> d^n -> c^n A>
-            if let Some(Item::Exp { block, exp: item_exp, visited: _ }) = rtape.last().copied() {
-                for (from_block, to_block) in [(0, 0), (3, 2)] {
-                    if block == from_block {
-                        if item_exp > 1 {
-                            rtape.pop();
-                            // A -> B if  A> a^2n+1
-                            if from_block == 0 && item_exp % 2 == 1 {
-                                self.head.state = 1
-                            }
-                            match ltape.last_mut() {
-                                Some(Item::Exp { block, exp, visited }) if *block == to_block => {
-                                    *exp = exp.checked_add(item_exp).unwrap();
-                                    *visited = true;
-                                    ui_dbg!("\tleap {}< merge", (from_block + b'a') as char);
-                                }
-                                _ => {
-                                    ltape.push(Item::Exp { block: to_block, exp: item_exp, visited: true });
-                                    ui_dbg!("\tleap {}<", (from_block + b'a') as char);
-                                }
-                            }
-                            return Ok(true);
-                        }
-                    }
+        if self.head.state == 0 && self.head.direction == Direction::Left {
+            // c^n <A b^m -> <A b^(n+m)    cargo run --bin 3x3_1a 8 0 --conf "! c^5 <A b^6 !"
+            if let [.., Exp { block: 2, exp: exp_c, .. }] = ltape.as_slice() {
+                if let [.., Exp { block: 1, exp: exp_b, .. }] = rtape.as_mut_slice() {
+                    *exp_b += exp_c;
+                    ltape.pop();
+                    return Ok(true);
                 }
             }
         }
-
-        // (a|c)^n <C 10 -> <C 10 (a|d)^n
-        if self.head.state == 2 && self.head.direction == Direction::Left && rtape.ends_with(&[Item::S(0), Item::S(1)])
-        {
-            if let Some(Item::Exp { block, exp: item_exp, visited: _ }) = ltape.last().copied() {
-                for (from_block, to_block) in [(0, 0), (2, 3)] {
-                    if block == from_block {
-                        ltape.pop();
-                        rtape.truncate(rtape.len() - 2);
-                        match rtape.last_mut() {
-                            Some(Item::Exp { block, exp, visited }) if *block == to_block => {
-                                *exp = exp.checked_add(item_exp).unwrap();
-                                *visited = true;
-                                ui_dbg!("\tleap {}< merge", (from_block + b'a') as char);
-                            }
-                            _ => {
-                                rtape.push(Item::Exp { block: to_block, exp: item_exp, visited: true });
-                                ui_dbg!("\tleap {}<", (from_block + b'a') as char);
-                            }
-                        }
-                        Self::compress(rtape, blocks)?; // maybe could be removed - usually it goes back through `01` & then it compresses
-                        rtape.push(Item::S(0));
-                        rtape.push(Item::S(1));
-                        return Ok(true);
-                    }
+        if self.head.state == 2 && self.head.direction == Direction::Left {
+            // c^n <C 1 b^m -> <C 1 b^(n+m)    cargo run --bin 3x3_1a 8 0 --conf "! c^5 <C 1 b^6 !"
+            if let [.., Exp { block: 2, exp: exp_c, .. }] = ltape.as_slice() {
+                if let [.., Exp { block: 1, exp: exp_b, .. }, S(1)] = rtape.as_mut_slice() {
+                    *exp_b += exp_c;
+                    ltape.pop();
+                    return Ok(true);
+                }
+            }
+        }
+        if self.head.state == 0 && self.head.direction == Direction::Right {
+            // c^n A> b^m -> c^(n+m) A>    cargo run --bin 3x3_1a 8 0 --conf "! c^5 A> b^6 !"
+            if let [.., Exp { block: 2, exp: exp_c, .. }] = ltape.as_mut_slice() {
+                if let [.., Exp { block: 1, exp: exp_b, .. }] = rtape.as_slice() {
+                    *exp_c += exp_b;
+                    rtape.pop();
+                    return Ok(true);
+                }
+            }
+        }
+        if self.head.state == 0 && self.head.direction == Direction::Right {
+            // c^n 2 A> b^m -> c^(n+m) 2 A>    cargo run --bin 3x3_1a 8 0 --conf "! c^5 2 A> b^6 !"
+            if let [.., Exp { block: 2, exp: exp_c, .. }, S(2)] = ltape.as_mut_slice() {
+                if let [.., Exp { block: 1, exp: exp_b, .. }] = rtape.as_slice() {
+                    *exp_c += exp_b;
+                    rtape.pop();
+                    return Ok(true);
+                }
+            }
+        }
+        if self.head.state == 1 && self.head.direction == Direction::Right {
+            // b^n B> b^m -> b^(n+m) B>    cargo run --bin 3x3_1a 8 0 --conf "! b^5 B> b^6 !"
+            if let [.., Exp { block: 1, exp: exp_to, .. }] = ltape.as_mut_slice() {
+                if let [.., Exp { block: 1, exp: exp_from, .. }] = rtape.as_slice() {
+                    *exp_to += exp_from;
+                    rtape.pop();
+                    return Ok(true);
                 }
             }
         }
