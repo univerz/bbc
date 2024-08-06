@@ -50,12 +50,12 @@ fn fmt_tape(t: TapeRef<'_>, f: &mut std::fmt::Formatter<'_>, orient: usize) -> s
     it.try_for_each(|i| i.fmt(f, orient))
 }
 
-struct P<'a>(TapeRef<'a>);
-impl<'a> std::fmt::Display for P<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt_tape(self.0, f, 0)
-    }
-}
+// struct P<'a>(TapeRef<'a>);
+// impl<'a> std::fmt::Display for P<'a> {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         fmt_tape(self.0, f, 0)
+//     }
+// }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pattern {
